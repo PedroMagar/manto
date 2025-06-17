@@ -38,6 +38,16 @@ pub fn draw_window(stdout: &mut std::io::Stdout, app: &Application) {
         cursor::MoveTo(app.position_x, app.position_y),
         style::Print(format!("┌{:─^1$}┐", format!(" {} ", app.title), app.width as usize - 2))
     ).unwrap();
+    
+    for i in 1..(app.height - 1) {
+        for j in 1..(app.width - 1) {
+            execute!(
+                stdout,
+                cursor::MoveTo(app.position_x + j, app.position_y + i),
+                style::Print(" ")
+            ).unwrap();
+        }
+    }
 
     for i in 1..(app.height - 1) {
         execute!(
