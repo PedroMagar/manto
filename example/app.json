@@ -1,0 +1,41 @@
+{
+  "app": "Example App",
+  "config": {
+    "size_x": "max",
+    "size_y": "max"
+  },
+  "window": {
+    "proportion": 1,
+    "direction": "x",
+    "children": {
+      "left": {
+        "proportion": 2
+      },
+      "center": {
+        "proportion": 1,
+        "direction": "y",
+        "children": {
+          "top": {
+            "proportion": 7
+          },
+          "middle": {
+            "proportion": 1,
+            "direction": "x",
+            "text": {
+              "value": "Button Text",
+              "align": "center",
+              "font-size": "12"
+            },
+            "children": {}
+          },
+          "bottom": {
+            "proportion": 7
+          }
+        }
+      },
+      "right": {
+        "proportion": 2
+      }
+    }
+  }
+}
