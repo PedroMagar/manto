@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 fn render(stdout: &mut std::io::Stdout, applications: &Vec<Application>, hovered: bool, w: u16, h: u16, pointer: &Pointer) {
     execute!(stdout, terminal::Clear(ClearType::All)).unwrap();
 
-    draw_desktop(stdout, w, h, "Manto");
+    draw_desktop(stdout, 1, w, h, "Manto");
 
     for app in applications {
         draw_window(stdout, app);
@@ -52,7 +52,7 @@ fn main() {
         title: String::from("Test2"),
         width: 17,
         height: 8,
-        position_x: 40,
+        position_x: 10,
         position_y: 1,
         layer: 0,
     };
