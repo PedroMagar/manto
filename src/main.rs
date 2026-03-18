@@ -1,16 +1,17 @@
 mod application;
 mod gui;
+mod os;
 mod pointer;
 mod terminal;
 
 use gui::{draw_desktop, draw_window, draw_button};
 pub use application::Application;
+use os::{Writer, Clock, Key};
 use pointer::Pointer;
-use terminal::Key;
-use std::io::{stdout, Write};
-use std::time::{Duration, Instant};
+use std::io::Write;
+use std::time::Duration;
 
-fn render(out: &mut impl Write, applications: &Vec<Application>, hovered: bool, w: u16, h: u16, pointer: &Pointer) {
+fn render(out: &mut Writer, applications: &Vec<Application>, hovered: bool, w: u16, h: u16, pointer: &Pointer) {
     terminal::clear(out);
 
     draw_desktop(out, 1, w, h, "Manto");
@@ -29,16 +30,15 @@ fn render(out: &mut impl Write, applications: &Vec<Application>, hovered: bool, 
 }
 
 fn main() {
-    let mut out = stdout();
+    let mut out = Writer::new();
 
-    terminal::enable_raw_mode();
+    os::enable_raw_mode();
     terminal::enter_alt_screen(&mut out);
     terminal::hide_cursor(&mut out);
     out.flush().unwrap();
 
-    // Lê o tamanho após o flush para garantir que a alt screen já foi processada
     let mut hovered   = false;
-    let mut last_size = terminal::size();
+    let mut last_size = os::size();
     let mut pointer   = Pointer::new(3, last_size.1 - 2);
 
     let app = Application {
@@ -61,11 +61,11 @@ fn main() {
 
     render(&mut out, &applications, hovered, last_size.0, last_size.1, &pointer);
 
-    let mut last_check = Instant::now();
+    let mut last_check = Clock::now();
 
     loop {
-        if terminal::poll(50) {
-            match terminal::read_key() {
+        if os::poll(50) {
+            match os::read_key() {
                 Key::Char('q') | Key::CtrlC => break,
                 Key::Up    => pointer.move_up(),
                 Key::Down  => pointer.move_down(last_size.1),
@@ -91,19 +91,19 @@ fn main() {
         }
 
         if last_check.elapsed() >= Duration::from_secs(1) {
-            let new_size = terminal::size();
+            let new_size = os::size();
             if new_size != last_size {
                 pointer.y = new_size.1 - (last_size.1 - pointer.y);
                 last_size = new_size;
                 pointer.clamp_to_bounds(last_size.0, last_size.1);
                 render(&mut out, &applications, hovered, new_size.0, new_size.1, &pointer);
             }
-            last_check = Instant::now();
+            last_check = Clock::now();
         }
     }
 
     terminal::leave_alt_screen(&mut out);
     terminal::show_cursor(&mut out);
     out.flush().unwrap();
-    terminal::disable_raw_mode();
+    os::disable_raw_mode();
 }
