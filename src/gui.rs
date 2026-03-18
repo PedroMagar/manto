@@ -39,6 +39,7 @@ pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &st
     write!(out, "└{:─^1$}┘", "", w as usize - 2).unwrap();
 }
 
+#[allow(dead_code)]
 pub fn draw_button(out: &mut impl Write, x: u16, y: u16, label: &str, hovered: bool) {
     terminal::move_to(out, x, y);
     if hovered {

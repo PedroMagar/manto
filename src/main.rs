@@ -5,7 +5,7 @@ mod pointer;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_button};
+use gui::draw_desktop;
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -19,10 +19,21 @@ enum Mode {
     Resizing { app_idx: usize },
 }
 
+/// Retorna o índice da janela visualmente no topo na posição (x, y).
+fn topmost_window_at(applications: &[Application], x: u16, y: u16) -> Option<usize> {
+    applications.iter().rposition(|app| {
+        app.window().map_or(false, |win| {
+            x >= win.position_x
+                && x < win.position_x + win.width
+                && y >= win.position_y
+                && y < win.position_y + win.height
+        })
+    })
+}
+
 fn render(
     out: &mut Writer,
     applications: &[Application],
-    button_hovered: bool,
     resize_preview: Option<(usize, u16, u16)>,
     cursor_interaction: Option<char>,
     w: u16,
@@ -38,11 +49,6 @@ fn render(
         }
     }
 
-    let button_label = "[ Clique-me ]";
-    let button_x = (w.saturating_sub(button_label.len() as u16)) / 2;
-    let button_y = h / 2;
-    draw_button(out, button_x, button_y, button_label, button_hovered);
-
     if let Some((idx, pw, ph)) = resize_preview {
         if let Some(win) = applications[idx].window() {
             win.draw_preview(out, pw, ph);
@@ -50,6 +56,23 @@ fn render(
     }
 
     pointer.draw(out, cursor_interaction);
+
+    // Hover nos cantos superiores da janela no topo: x (fechar) e - (minimizar)
+    // Só mostra se a janela no topo nessa posição tiver o canto ali
+    if let Some(top_idx) = topmost_window_at(applications, pointer.x, pointer.y) {
+        if let Some(win) = applications[top_idx].window() {
+            if pointer.y == win.position_y {
+                if pointer.x == win.position_x + win.width - 1 {
+                    terminal::move_to(out, pointer.x, pointer.y);
+                    write!(out, "{}x{}", terminal::REVERSE, terminal::RESET).unwrap();
+                } else if pointer.x == win.position_x {
+                    terminal::move_to(out, pointer.x, pointer.y);
+                    write!(out, "{}-{}", terminal::REVERSE, terminal::RESET).unwrap();
+                }
+            }
+        }
+    }
+
     out.flush().unwrap();
 }
 
@@ -62,7 +85,6 @@ fn main() {
     out.flush().unwrap();
 
     let mut mode    = Mode::Normal;
-    let mut hovered = false;
     let mut last_size = os::size();
     let mut pointer   = Pointer::new(3, last_size.1 - 2);
 
@@ -72,7 +94,7 @@ fn main() {
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-    render(&mut out, &applications, hovered, preview, cursor, last_size.0, last_size.1, &pointer);
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer);
 
     let mut last_check = Clock::now();
 
@@ -91,49 +113,35 @@ fn main() {
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
                         Key::Right => pointer.move_right(last_size.0),
-                        Key::Enter if hovered => {
-                            terminal::move_to(&mut out, 2, last_size.1.saturating_sub(2));
-                            write!(out, "{}Você clicou no botão!{}", terminal::FG_GREEN, terminal::RESET).unwrap();
-                            out.flush().unwrap();
-                        }
-                        // Space sobre uma janela: quina → resize, título → mover, resto → traz para frente
+                        // Space: age apenas sobre a janela visualmente no topo
                         Key::Char(' ') => {
-                            if let Some(idx) = applications.iter().position(|app| {
-                                app.window().map_or(false, |win| {
-                                    pointer.x == win.position_x + win.width - 1
-                                        && pointer.y == win.position_y + win.height - 1
-                                })
-                            }) {
-                                mode = Mode::Resizing { app_idx: idx };
-                                mode_changed = true;
-                            } else if let Some(idx) = applications.iter().rposition(|app| {
-                                app.window().map_or(false, |win| {
-                                    pointer.y == win.position_y
+                            if let Some(top_idx) = topmost_window_at(&applications, pointer.x, pointer.y) {
+                                let (is_resize, is_title, offset_x) = {
+                                    let win = applications[top_idx].window().unwrap();
+                                    let resize = pointer.x == win.position_x + win.width - 1
+                                        && pointer.y == win.position_y + win.height - 1;
+                                    let title = pointer.y == win.position_y
                                         && pointer.x > win.position_x
-                                        && pointer.x < win.position_x + win.width - 1
-                                })
-                            }) {
-                                let offset_x = pointer.x
-                                    .saturating_sub(applications[idx].window().unwrap().position_x);
-                                let final_idx = if idx != applications.len() - 1 {
-                                    let app = applications.remove(idx);
-                                    applications.push(app);
-                                    applications.len() - 1
-                                } else {
-                                    idx
+                                        && pointer.x < win.position_x + win.width - 1;
+                                    let ox = pointer.x.saturating_sub(win.position_x);
+                                    (resize, title, ox)
                                 };
-                                mode = Mode::Moving { app_idx: final_idx, offset_x };
-                                mode_changed = true;
-                            } else if let Some(idx) = applications.iter().rposition(|app| {
-                                app.window().map_or(false, |win| {
-                                    pointer.x >= win.position_x
-                                        && pointer.x < win.position_x + win.width
-                                        && pointer.y >= win.position_y
-                                        && pointer.y < win.position_y + win.height
-                                })
-                            }) {
-                                if idx != applications.len() - 1 {
-                                    let app = applications.remove(idx);
+
+                                if is_resize {
+                                    mode = Mode::Resizing { app_idx: top_idx };
+                                    mode_changed = true;
+                                } else if is_title {
+                                    let final_idx = if top_idx != applications.len() - 1 {
+                                        let app = applications.remove(top_idx);
+                                        applications.push(app);
+                                        applications.len() - 1
+                                    } else {
+                                        top_idx
+                                    };
+                                    mode = Mode::Moving { app_idx: final_idx, offset_x };
+                                    mode_changed = true;
+                                } else if top_idx != applications.len() - 1 {
+                                    let app = applications.remove(top_idx);
                                     applications.push(app);
                                     mode_changed = true;
                                 }
@@ -184,15 +192,8 @@ fn main() {
 
             let moved = (pointer.x, pointer.y) != prev;
             if moved || mode_changed {
-                let button_label = "[ Clique-me ]";
-                let button_x = (last_size.0.saturating_sub(button_label.len() as u16)) / 2;
-                let button_y = last_size.1 / 2;
-                hovered = pointer.y == button_y
-                    && pointer.x >= button_x
-                    && pointer.x < button_x + button_label.len() as u16;
-
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, hovered, preview, cursor, last_size.0, last_size.1, &pointer);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer);
             }
         }
 
@@ -203,7 +204,7 @@ fn main() {
                 last_size = new_size;
                 pointer.clamp_to_bounds(last_size.0, last_size.1);
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, hovered, preview, cursor, last_size.0, last_size.1, &pointer);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer);
             }
             last_check = Clock::now();
         }
@@ -232,6 +233,6 @@ fn compute_render_state(
             }
         }
         Mode::Moving { .. } => (None, None),
-        Mode::Normal => (None, None),
+        Mode::Normal      => (None, None),
     }
 }

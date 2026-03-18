@@ -1,4 +1,5 @@
 // terminal.rs — Sequências ANSI/VT100 puras.
+#![allow(dead_code)]
 //
 // Este arquivo não tem dependência de OS. Todas as funções recebem um writer
 // genérico e emitem apenas bytes de escape ANSI — funcionam em qualquer
