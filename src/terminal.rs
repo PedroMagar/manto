@@ -38,6 +38,7 @@ pub fn leave_alt_screen(out: &mut impl Write) {
 // ── Cores (SGR) ──────────────────────────────────────────────────────────────
 
 pub const RESET:        &str = "\x1b[0m";
+pub const REVERSE:      &str = "\x1b[7m";
 pub const FG_BLACK:     &str = "\x1b[30m";
 pub const FG_WHITE:     &str = "\x1b[37m";
 pub const FG_GREEN:     &str = "\x1b[32m";

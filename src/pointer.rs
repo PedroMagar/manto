@@ -33,8 +33,14 @@ impl Pointer {
         self.x = (self.x + 1).min(max.saturating_sub(2));
     }
 
-    pub fn draw(&self, out: &mut impl Write) {
+    /// Desenha o cursor.
+    /// `interaction`: None = cursor normal (░)
+    ///                Some(c) = cursor interativo — mostra `c` em reverse video
+    pub fn draw(&self, out: &mut impl Write, interaction: Option<char>) {
         terminal::move_to(out, self.x, self.y);
-        write!(out, "░").unwrap();
+        match interaction {
+            None    => write!(out, "░").unwrap(),
+            Some(c) => write!(out, "{}{}{}", terminal::REVERSE, c, terminal::RESET).unwrap(),
+        }
     }
 }
