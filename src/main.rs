@@ -207,9 +207,10 @@ fn main() {
     terminal::hide_cursor(&mut out);
     out.flush().unwrap();
 
-    let mut mode          = Mode::Normal;
+    let mut mode             = Mode::Normal;
     let mut scroll_offset: usize = 0;
     let mut tab_scroll:    usize = 0;
+    let mut last_space_time: Option<Clock> = None;
     let mut last_size     = os::size();
     let mut pointer       = Pointer::new(3, last_size.1 - 2);
 
@@ -249,6 +250,7 @@ fn main() {
 
                             // Scrollbar (coluna mais à direita): metade superior sobe, inferior desce
                             if pointer.x == sb_x {
+                                last_space_time = None;
                                 let mid = (sb_top + sb_bot) / 2;
                                 if pointer.y <= mid {
                                     tab_scroll = tab_scroll.saturating_sub(1);
@@ -259,6 +261,7 @@ fn main() {
                                 mode_changed = true;
                             // Aba → restaura app minimizado
                             } else if pointer.x >= tab_x {
+                                last_space_time = None;
                                 let on_tab = tab_layout(&applications, last_size.1, tab_scroll)
                                     .into_iter()
                                     .find(|&(_, ty, th)| pointer.y >= ty && pointer.y < ty + th)
@@ -288,6 +291,7 @@ fn main() {
                                         pointer.x.saturating_sub(lx),
                                     )
                                 };
+                                let maximized = applications[top_idx].is_maximized();
 
                                 if is_minimize {
                                     applications[top_idx].minimize();
@@ -297,36 +301,65 @@ fn main() {
                                     tab_scroll = tab_scroll
                                         .min(max_tab_scroll(&applications, last_size.1));
                                     mode_changed = true;
-                                } else if is_resize {
+                                } else if is_resize && !maximized {
                                     mode = Mode::Resizing { app_idx: top_idx };
                                     mode_changed = true;
                                 } else if is_title {
-                                    let final_idx = if top_idx != applications.len() - 1 {
+                                    // Duplo toque na barra de título → maximizar / restaurar
+                                    let now = Clock::now();
+                                    let is_double = last_space_time
+                                        .as_ref()
+                                        .map(|t| t.elapsed() < Duration::from_millis(300))
+                                        .unwrap_or(false);
+                                    last_space_time = if is_double { None } else { Some(now) };
+
+                                    if is_double {
+                                        if maximized {
+                                            applications[top_idx].restore_maximize();
+                                        } else {
+                                            applications[top_idx].maximize(last_size.0, last_size.1);
+                                        }
+                                        mode_changed = true;
+                                    } else if !maximized {
+                                        let final_idx = if top_idx != applications.len() - 1 {
+                                            let app = applications.remove(top_idx);
+                                            applications.push(app);
+                                            applications.len() - 1
+                                        } else {
+                                            top_idx
+                                        };
+                                        mode = Mode::Moving { app_idx: final_idx, offset_x };
+                                        mode_changed = true;
+                                    }
+                                } else {
+                                    last_space_time = None;
+                                    if top_idx != applications.len() - 1 {
                                         let app = applications.remove(top_idx);
                                         applications.push(app);
-                                        applications.len() - 1
-                                    } else {
-                                        top_idx
-                                    };
-                                    mode = Mode::Moving { app_idx: final_idx, offset_x };
-                                    mode_changed = true;
-                                } else if top_idx != applications.len() - 1 {
-                                    let app = applications.remove(top_idx);
-                                    applications.push(app);
-                                    mode_changed = true;
+                                        mode_changed = true;
+                                    }
                                 }
                             }
                         }
                         _ => {}
                     },
 
-                    Mode::Moving { .. } => match key {
+                    Mode::Moving { app_idx, .. } => match key {
                         Key::Up    => pointer.move_up(),
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
                         Key::Right => pointer.move_right(last_size.0),
                         Key::Char(' ') => {
+                            let idx = *app_idx;
+                            let is_double = last_space_time
+                                .as_ref()
+                                .map(|t| t.elapsed() < Duration::from_millis(300))
+                                .unwrap_or(false);
+                            last_space_time = None;
                             mode = Mode::Normal;
+                            if is_double {
+                                applications[idx].maximize(last_size.0, last_size.1);
+                            }
                             mode_changed = true;
                         }
                         _ => {}
