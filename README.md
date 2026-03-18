@@ -24,3 +24,5 @@ Manto is a desktop environment design to run from terminal.
     - Shortcut Manager
 - App Builder
 - run
+
+## Design

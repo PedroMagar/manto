@@ -3,16 +3,15 @@ mod gui;
 mod os;
 mod pointer;
 mod terminal;
+mod window;
 
-use gui::{draw_desktop, draw_window, draw_window_preview, draw_button};
+use gui::{draw_desktop, draw_button};
 pub use application::Application;
+use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
 use pointer::Pointer;
 use std::io::Write;
 use std::time::Duration;
-
-const MIN_W: u16 = 5;
-const MIN_H: u16 = 3;
 
 enum Mode {
     Normal,
@@ -33,7 +32,9 @@ fn render(
     draw_desktop(out, 1, w, h, "Manto");
 
     for app in applications {
-        draw_window(out, app);
+        if let Some(win) = app.window() {
+            win.draw(out, &app.title);
+        }
     }
 
     let button_label = "[ Clique-me ]";
@@ -42,7 +43,9 @@ fn render(
     draw_button(out, button_x, button_y, button_label, button_hovered);
 
     if let Some((idx, pw, ph)) = resize_preview {
-        draw_window_preview(out, &applications[idx], pw, ph);
+        if let Some(win) = applications[idx].window() {
+            win.draw_preview(out, pw, ph);
+        }
     }
 
     pointer.draw(out, cursor_interaction);
@@ -63,8 +66,8 @@ fn main() {
     let mut pointer   = Pointer::new(3, last_size.1 - 2);
 
     let mut applications = vec![
-        Application { title: String::from("Test"),  width: 17, height: 8, position_x: 2,  position_y: 1, layer: 0 },
-        Application { title: String::from("Test2"), width: 17, height: 8, position_x: 10, position_y: 1, layer: 0 },
+        Application::windowed("Test",  Window::new(2,  1, 17, 8, 0)),
+        Application::windowed("Test2", Window::new(10, 1, 17, 8, 0)),
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
@@ -95,8 +98,10 @@ fn main() {
                         // Space sobre a quina inferior direita de uma janela → resize
                         Key::Char(' ') => {
                             if let Some(idx) = applications.iter().position(|app| {
-                                pointer.x == app.position_x + app.width - 1
-                                    && pointer.y == app.position_y + app.height - 1
+                                app.window().map_or(false, |win| {
+                                    pointer.x == win.position_x + win.width - 1
+                                        && pointer.y == win.position_y + win.height - 1
+                                })
                             }) {
                                 mode = Mode::Resizing { app_idx: idx };
                                 mode_changed = true;
@@ -113,9 +118,10 @@ fn main() {
                         // Space novamente → confirma o novo tamanho
                         Key::Char(' ') => {
                             let idx = *app_idx;
-                            let app = &mut applications[idx];
-                            app.width  = (pointer.x.saturating_sub(app.position_x) + 1).max(MIN_W);
-                            app.height = (pointer.y.saturating_sub(app.position_y) + 1).max(MIN_H);
+                            if let Some(win) = applications[idx].window_mut() {
+                                win.width  = (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W);
+                                win.height = (pointer.y.saturating_sub(win.position_y) + 1).max(MIN_H);
+                            }
                             mode = Mode::Normal;
                             mode_changed = true;
                         }
@@ -165,10 +171,13 @@ fn compute_render_state(
     match mode {
         Mode::Resizing { app_idx } => {
             let idx = *app_idx;
-            let app = &applications[idx];
-            let pw  = (pointer.x.saturating_sub(app.position_x) + 1).max(MIN_W);
-            let ph  = (pointer.y.saturating_sub(app.position_y) + 1).max(MIN_H);
-            (Some((idx, pw, ph)), Some('┼'))
+            if let Some(win) = applications[idx].window() {
+                let pw = (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W);
+                let ph = (pointer.y.saturating_sub(win.position_y) + 1).max(MIN_H);
+                (Some((idx, pw, ph)), Some('┼'))
+            } else {
+                (None, None)
+            }
         }
         Mode::Normal => (None, None),
     }
