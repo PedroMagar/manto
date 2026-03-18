@@ -1,5 +1,6 @@
-use crossterm::{cursor, execute, style};
 use std::io::Write;
+
+use crate::terminal;
 
 pub struct Pointer {
     pub x: u16,
@@ -32,7 +33,8 @@ impl Pointer {
         self.x = (self.x + 1).min(max.saturating_sub(2));
     }
 
-    pub fn draw<W: Write>(&self, stdout: &mut W) {
-        execute!(stdout, cursor::MoveTo(self.x, self.y), style::Print("░")).unwrap();
+    pub fn draw(&self, out: &mut impl Write) {
+        terminal::move_to(out, self.x, self.y);
+        write!(out, "░").unwrap();
     }
 }
