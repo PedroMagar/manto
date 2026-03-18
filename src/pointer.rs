@@ -13,7 +13,7 @@ impl Pointer {
     }
 
     pub fn clamp_to_bounds(&mut self, width: u16, height: u16) {
-        self.x = self.x.max(1).min(width.saturating_sub(2));
+        self.x = self.x.max(1).min(width.saturating_sub(1));
         self.y = self.y.max(1).min(height.saturating_sub(2));
     }
 
@@ -30,7 +30,7 @@ impl Pointer {
     }
 
     pub fn move_right(&mut self, max: u16) {
-        self.x = (self.x + 1).min(max.saturating_sub(2));
+        self.x = (self.x + 1).min(max.saturating_sub(1));
     }
 
     /// Desenha o cursor.

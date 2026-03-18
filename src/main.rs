@@ -5,7 +5,7 @@ mod pointer;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_tab};
+use gui::{draw_desktop, draw_tab, draw_scrollbar};
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -31,27 +31,74 @@ fn topmost_window_at(applications: &[Application], x: u16, y: u16) -> Option<usi
     })
 }
 
-/// Calcula (app_idx, tab_y, tab_height) para cada app minimizado.
-/// Altura padrão 8; compacta para 4 se não couber.
-fn tab_layout(applications: &[Application], screen_h: u16) -> Vec<(usize, u16, u16)> {
+/// Calcula (app_idx, tab_y, tab_height) para cada app minimizado visível.
+fn tab_layout(applications: &[Application], screen_h: u16, scroll: usize) -> Vec<(usize, u16, u16)> {
     let usable_h = screen_h.saturating_sub(4);
     let minimized: Vec<usize> = applications.iter().enumerate()
         .filter(|(_, a)| a.is_minimized())
         .map(|(i, _)| i)
         .collect();
 
-    if minimized.is_empty() || usable_h == 0 {
-        return vec![];
-    }
+    if minimized.is_empty() || usable_h == 0 { return vec![]; }
 
-    let tab_h: u16 = if minimized.len() as u16 * 8 <= usable_h { 8 } else { 4 };
+    // tab_h 8 → 6 conteúdo + 2 bordas; compacto 6 → 4 conteúdo (mínimo garantido)
+    let tab_h: u16 = if minimized.len() as u16 * 8 <= usable_h { 8 } else { 6 };
     let max_visible = (usable_h / tab_h) as usize;
 
     minimized.into_iter()
+        .skip(scroll)
         .take(max_visible)
         .enumerate()
         .map(|(i, app_idx)| (app_idx, 1 + i as u16 * tab_h, tab_h))
         .collect()
+}
+
+fn window_border_char(win: &Window, title: &str, x: u16, y: u16) -> char {
+    let lx = win.position_x;
+    let rx = win.position_x + win.width - 1;
+    let ty = win.position_y;
+    let by = win.position_y + win.height - 1;
+    if y == ty {
+        if x == lx { return '-'; }
+        if x == rx { return 'x'; }
+        let bar = format!("{:─^1$}", format!(" {} ", title), (win.width - 2) as usize);
+        return bar.chars().nth((x - lx - 1) as usize).unwrap_or('─');
+    }
+    if y == by {
+        if x == lx { return '└'; }
+        if x == rx { return '┘'; }
+        return '─';
+    }
+    '│'
+}
+
+fn tab_cell_char(tab_x: u16, tab_y: u16, tab_h: u16, title: &str, x: u16, y: u16, scroll_offset: usize) -> char {
+    let content_rows = tab_h.saturating_sub(2) as usize;
+    let padded = if title.chars().count() > content_rows {
+        format!("{}  ", title)
+    } else {
+        title.to_string()
+    };
+    let chars: Vec<char> = padded.chars().collect();
+    let len = chars.len();
+    if y == tab_y || y == tab_y + tab_h - 1 {
+        return if x == tab_x {
+            if y == tab_y { '┌' } else { '└' }
+        } else { '─' };
+    }
+    if x == tab_x { return '│'; }
+    let i = (y - tab_y - 1) as usize;
+    if len == 0 { ' ' } else if len <= content_rows { chars.get(i).copied().unwrap_or(' ') } else { chars[(scroll_offset + i) % len] }
+}
+
+/// Scroll máximo possível para as abas.
+fn max_tab_scroll(applications: &[Application], screen_h: u16) -> usize {
+    let usable_h = screen_h.saturating_sub(4);
+    let total = applications.iter().filter(|a| a.is_minimized()).count();
+    if total == 0 || usable_h == 0 { return 0; }
+    let tab_h: u16 = if (total as u16) * 8 <= usable_h { 8 } else { 6 };
+    let max_visible = (usable_h / tab_h) as usize;
+    total.saturating_sub(max_visible)
 }
 
 fn render(
@@ -63,6 +110,7 @@ fn render(
     h: u16,
     pointer: &Pointer,
     scroll_offset: usize,
+    tab_scroll: usize,
 ) {
     terminal::clear(out);
     draw_desktop(out, 1, w, h, "Manto");
@@ -73,10 +121,22 @@ fn render(
         }
     }
 
-    // Abas na direita para apps minimizados
+    // Abas e scrollbar
+    let minimized_count = applications.iter().filter(|a| a.is_minimized()).count();
     let tab_x = w.saturating_sub(3);
-    for (app_idx, tab_y, tab_h) in tab_layout(applications, h) {
-        draw_tab(out, tab_x, tab_y, tab_h, &applications[app_idx].title, scroll_offset);
+    let sb_x  = w.saturating_sub(1);
+    let sb_top = 1u16;
+    let sb_bot = h.saturating_sub(4);
+    let tabs = tab_layout(applications, h, tab_scroll);
+    if minimized_count > 0 {
+        for &(app_idx, tab_y, tab_h) in &tabs {
+            let is_hovered = pointer.x >= tab_x
+                && pointer.y >= tab_y
+                && pointer.y < tab_y + tab_h;
+            let offset = if is_hovered { scroll_offset } else { 0 };
+            draw_tab(out, tab_x, tab_y, tab_h, &applications[app_idx].title, offset);
+        }
+        draw_scrollbar(out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
     }
 
     if let Some((idx, pw, ph)) = resize_preview {
@@ -85,22 +145,56 @@ fn render(
         }
     }
 
-    pointer.draw(out, cursor_interaction);
+    // Cursor unificado: ░ por padrão, negativo da célula clicável/borda em reverse video
+    let effective_cursor = cursor_interaction.or_else(|| {
+        let px = pointer.x;
+        let py = pointer.y;
 
-    // Hover nos cantos superiores da janela no topo: x (fechar) e - (minimizar)
-    if let Some(top_idx) = topmost_window_at(applications, pointer.x, pointer.y) {
-        if let Some(win) = applications[top_idx].window() {
-            if pointer.y == win.position_y {
-                if pointer.x == win.position_x + win.width - 1 {
-                    terminal::move_to(out, pointer.x, pointer.y);
-                    write!(out, "{}x{}", terminal::REVERSE, terminal::RESET).unwrap();
-                } else if pointer.x == win.position_x {
-                    terminal::move_to(out, pointer.x, pointer.y);
-                    write!(out, "{}-{}", terminal::REVERSE, terminal::RESET).unwrap();
+        // Scrollbar
+        if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
+            let track_len = (sb_bot - sb_top + 1) as usize;
+            let visible = tabs.len();
+            let max_sc = minimized_count - visible;
+            let thumb_len = (((visible as f32 / minimized_count as f32) * track_len as f32)
+                .max(1.0) as usize)
+                .min(track_len);
+            let available = track_len - thumb_len;
+            let thumb_pos = if max_sc > 0 { (tab_scroll * available / max_sc).min(available) } else { 0 };
+            let row = (py - sb_top) as usize;
+            return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
+        }
+
+        // Tab strip
+        if px >= tab_x && px < sb_x {
+            if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
+                .find(|&&(_, ty, th)| py >= ty && py < ty + th)
+            {
+                return Some(tab_cell_char(
+                    tab_x, tab_y, tab_h,
+                    &applications[app_idx].title,
+                    px, py, scroll_offset,
+                ));
+            }
+        }
+
+        // Borda da janela no topo
+        if let Some(top_idx) = topmost_window_at(applications, px, py) {
+            if let Some(win) = applications[top_idx].window() {
+                let lx = win.position_x;
+                let rx = win.position_x + win.width - 1;
+                let ty = win.position_y;
+                let by = win.position_y + win.height - 1;
+                let on_border = ((py == ty || py == by) && px >= lx && px <= rx)
+                    || ((px == lx || px == rx) && py > ty && py < by);
+                if on_border {
+                    return Some(window_border_char(win, &applications[top_idx].title, px, py));
                 }
             }
         }
-    }
+
+        None
+    });
+    pointer.draw(out, effective_cursor);
 
     out.flush().unwrap();
 }
@@ -113,18 +207,21 @@ fn main() {
     terminal::hide_cursor(&mut out);
     out.flush().unwrap();
 
-    let mut mode         = Mode::Normal;
+    let mut mode          = Mode::Normal;
     let mut scroll_offset: usize = 0;
-    let mut last_size    = os::size();
-    let mut pointer      = Pointer::new(3, last_size.1 - 2);
+    let mut tab_scroll:    usize = 0;
+    let mut last_size     = os::size();
+    let mut pointer       = Pointer::new(3, last_size.1 - 2);
 
     let mut applications = vec![
-        Application::windowed("Test",  Window::new(2,  1, 17, 8, 0)),
-        Application::windowed("Test2", Window::new(10, 1, 17, 8, 0)),
+        Application::windowed("Test",    Window::new(2,  1, 17, 8, 0)),
+        Application::windowed("Test2",   Window::new(22, 1, 17, 8, 0)),
+        Application::windowed("Test3",   Window::new(2,  11, 17, 8, 0)),
+        Application::windowed("Test4",   Window::new(22, 11, 17, 8, 0)),
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset);
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
 
     let mut last_check = Clock::now();
 
@@ -145,21 +242,35 @@ fn main() {
                         Key::Right => pointer.move_right(last_size.0),
 
                         Key::Char(' ') => {
-                            let tab_x = last_size.0.saturating_sub(2);
+                            let sb_x   = last_size.0.saturating_sub(1);
+                            let sb_top = 1u16;
+                            let sb_bot = last_size.1.saturating_sub(4);
+                            let tab_x  = last_size.0.saturating_sub(3);
 
-                            // Aba no lado direito → restaura app minimizado
-                            let on_tab = if pointer.x >= tab_x {
-                                tab_layout(&applications, last_size.1)
+                            // Scrollbar (coluna mais à direita): metade superior sobe, inferior desce
+                            if pointer.x == sb_x {
+                                let mid = (sb_top + sb_bot) / 2;
+                                if pointer.y <= mid {
+                                    tab_scroll = tab_scroll.saturating_sub(1);
+                                } else {
+                                    tab_scroll = (tab_scroll + 1)
+                                        .min(max_tab_scroll(&applications, last_size.1));
+                                }
+                                mode_changed = true;
+                            // Aba → restaura app minimizado
+                            } else if pointer.x >= tab_x {
+                                let on_tab = tab_layout(&applications, last_size.1, tab_scroll)
                                     .into_iter()
                                     .find(|&(_, ty, th)| pointer.y >= ty && pointer.y < ty + th)
-                                    .map(|(idx, _, _)| idx)
-                            } else {
-                                None
-                            };
+                                    .map(|(idx, _, _)| idx);
 
-                            if let Some(app_idx) = on_tab {
-                                applications[app_idx].restore();
-                                mode_changed = true;
+                                if let Some(app_idx) = on_tab {
+                                    applications[app_idx].restore();
+                                    tab_scroll = tab_scroll
+                                        .min(max_tab_scroll(&applications, last_size.1));
+                                    mode_changed = true;
+                                }
+                            // Janela
                             } else if let Some(top_idx) =
                                 topmost_window_at(&applications, pointer.x, pointer.y)
                             {
@@ -183,6 +294,8 @@ fn main() {
                                     mode_changed = true;
                                 } else if is_close {
                                     applications.remove(top_idx);
+                                    tab_scroll = tab_scroll
+                                        .min(max_tab_scroll(&applications, last_size.1));
                                     mode_changed = true;
                                 } else if is_resize {
                                     mode = Mode::Resizing { app_idx: top_idx };
@@ -238,6 +351,23 @@ fn main() {
                 },
             }
 
+            // Em modo Normal: coluna do scrollbar acessível só quando há scroll;
+            // quando acessível, o ponteiro fica limitado à faixa vertical da scrollbar.
+            if matches!(&mode, Mode::Normal) {
+                let sb_x = last_size.0.saturating_sub(1);
+                if pointer.x == sb_x {
+                    let minimized_count = applications.iter().filter(|a| a.is_minimized()).count();
+                    let tab_count = tab_layout(&applications, last_size.1, tab_scroll).len();
+                    if minimized_count <= tab_count {
+                        pointer.x = sb_x.saturating_sub(1);
+                    } else {
+                        let sb_top = 1u16;
+                        let sb_bot = last_size.1.saturating_sub(4);
+                        pointer.y = pointer.y.max(sb_top).min(sb_bot);
+                    }
+                }
+            }
+
             // Atualiza posição da janela em tempo real durante o movimento
             if let Mode::Moving { app_idx, offset_x } = &mode {
                 if let Some(win) = applications[*app_idx].window_mut() {
@@ -249,7 +379,7 @@ fn main() {
             let moved = (pointer.x, pointer.y) != prev;
             if moved || mode_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
             }
         }
 
@@ -261,14 +391,22 @@ fn main() {
                 pointer.y = new_size.1 - (last_size.1 - pointer.y);
                 last_size = new_size;
                 pointer.clamp_to_bounds(last_size.0, last_size.1);
+                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, last_size.1));
             }
-            // Re-renderiza só se o tamanho mudou ou se há aba com título a rolar
-            let needs_scroll = tab_layout(&applications, last_size.1).iter().any(|&(idx, _, tab_h)| {
-                applications[idx].title.chars().count() > tab_h.saturating_sub(2) as usize
-            });
+            // Só anima o título da aba sob o cursor
+            let tab_x = last_size.0.saturating_sub(3);
+            let needs_scroll = tab_layout(&applications, last_size.1, tab_scroll)
+                .iter()
+                .any(|&(idx, tab_y, tab_h)| {
+                    let is_hovered = pointer.x >= tab_x
+                        && pointer.y >= tab_y
+                        && pointer.y < tab_y + tab_h;
+                    is_hovered
+                        && applications[idx].title.chars().count() > tab_h.saturating_sub(2) as usize
+                });
             if size_changed || needs_scroll {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
             }
             last_check = Clock::now();
         }
