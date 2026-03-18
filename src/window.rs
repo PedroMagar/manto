@@ -39,6 +39,29 @@ impl Window {
         write!(out, "┘").unwrap();
     }
 
+    /// Retorna o caractere visível na borda em (x, y), ou None se for interior.
+    /// Os cantos de ação usam os seus símbolos interativos: '-' (minimizar) e 'x' (fechar).
+    pub fn char_at(&self, x: u16, y: u16, title: &str) -> Option<char> {
+        let lx = self.position_x;
+        let rx = self.position_x + self.width - 1;
+        let ty = self.position_y;
+        let by = self.position_y + self.height - 1;
+        if x < lx || x > rx || y < ty || y > by { return None; }
+        if y == ty {
+            if x == lx { return Some('-'); }
+            if x == rx { return Some('x'); }
+            let bar = format!("{:─^1$}", format!(" {} ", title), (self.width - 2) as usize);
+            return Some(bar.chars().nth((x - lx - 1) as usize).unwrap_or('─'));
+        }
+        if y == by {
+            if x == lx { return Some('└'); }
+            if x == rx { return Some('┘'); }
+            return Some('─');
+        }
+        if x == lx || x == rx { return Some('│'); }
+        None
+    }
+
     /// Desenha o DELTA do novo tamanho sobre o frame já renderizado, sem apagar o original.
     ///
     /// Regras:

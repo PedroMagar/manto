@@ -5,7 +5,7 @@ mod pointer;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_tab, draw_scrollbar};
+use gui::{draw_desktop, draw_tab, draw_scrollbar, tab_char_at, scrollbar_thumb};
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -53,43 +53,6 @@ fn tab_layout(applications: &[Application], screen_h: u16, scroll: usize) -> Vec
         .collect()
 }
 
-fn window_border_char(win: &Window, title: &str, x: u16, y: u16) -> char {
-    let lx = win.position_x;
-    let rx = win.position_x + win.width - 1;
-    let ty = win.position_y;
-    let by = win.position_y + win.height - 1;
-    if y == ty {
-        if x == lx { return '-'; }
-        if x == rx { return 'x'; }
-        let bar = format!("{:─^1$}", format!(" {} ", title), (win.width - 2) as usize);
-        return bar.chars().nth((x - lx - 1) as usize).unwrap_or('─');
-    }
-    if y == by {
-        if x == lx { return '└'; }
-        if x == rx { return '┘'; }
-        return '─';
-    }
-    '│'
-}
-
-fn tab_cell_char(tab_x: u16, tab_y: u16, tab_h: u16, title: &str, x: u16, y: u16, scroll_offset: usize) -> char {
-    let content_rows = tab_h.saturating_sub(2) as usize;
-    let padded = if title.chars().count() > content_rows {
-        format!("{}  ", title)
-    } else {
-        title.to_string()
-    };
-    let chars: Vec<char> = padded.chars().collect();
-    let len = chars.len();
-    if y == tab_y || y == tab_y + tab_h - 1 {
-        return if x == tab_x {
-            if y == tab_y { '┌' } else { '└' }
-        } else { '─' };
-    }
-    if x == tab_x { return '│'; }
-    let i = (y - tab_y - 1) as usize;
-    if len == 0 { ' ' } else if len <= content_rows { chars.get(i).copied().unwrap_or(' ') } else { chars[(scroll_offset + i) % len] }
-}
 
 /// Scroll máximo possível para as abas.
 fn max_tab_scroll(applications: &[Application], screen_h: u16) -> usize {
@@ -153,13 +116,7 @@ fn render(
         // Scrollbar
         if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
             let track_len = (sb_bot - sb_top + 1) as usize;
-            let visible = tabs.len();
-            let max_sc = minimized_count - visible;
-            let thumb_len = (((visible as f32 / minimized_count as f32) * track_len as f32)
-                .max(1.0) as usize)
-                .min(track_len);
-            let available = track_len - thumb_len;
-            let thumb_pos = if max_sc > 0 { (tab_scroll * available / max_sc).min(available) } else { 0 };
+            let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
             let row = (py - sb_top) as usize;
             return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
         }
@@ -169,7 +126,7 @@ fn render(
             if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
                 .find(|&&(_, ty, th)| py >= ty && py < ty + th)
             {
-                return Some(tab_cell_char(
+                return Some(tab_char_at(
                     tab_x, tab_y, tab_h,
                     &applications[app_idx].title,
                     px, py, scroll_offset,
@@ -180,14 +137,8 @@ fn render(
         // Borda da janela no topo
         if let Some(top_idx) = topmost_window_at(applications, px, py) {
             if let Some(win) = applications[top_idx].window() {
-                let lx = win.position_x;
-                let rx = win.position_x + win.width - 1;
-                let ty = win.position_y;
-                let by = win.position_y + win.height - 1;
-                let on_border = ((py == ty || py == by) && px >= lx && px <= rx)
-                    || ((px == lx || px == rx) && py > ty && py < by);
-                if on_border {
-                    return Some(window_border_char(win, &applications[top_idx].title, px, py));
+                if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
+                    return Some(ch);
                 }
             }
         }
