@@ -95,7 +95,7 @@ fn main() {
                             write!(out, "{}Você clicou no botão!{}", terminal::FG_GREEN, terminal::RESET).unwrap();
                             out.flush().unwrap();
                         }
-                        // Space sobre a quina inferior direita de uma janela → resize
+                        // Space sobre uma janela: quina → resize, resto → traz para frente
                         Key::Char(' ') => {
                             if let Some(idx) = applications.iter().position(|app| {
                                 app.window().map_or(false, |win| {
@@ -105,6 +105,19 @@ fn main() {
                             }) {
                                 mode = Mode::Resizing { app_idx: idx };
                                 mode_changed = true;
+                            } else if let Some(idx) = applications.iter().rposition(|app| {
+                                app.window().map_or(false, |win| {
+                                    pointer.x >= win.position_x
+                                        && pointer.x < win.position_x + win.width
+                                        && pointer.y >= win.position_y
+                                        && pointer.y < win.position_y + win.height
+                                })
+                            }) {
+                                if idx != applications.len() - 1 {
+                                    let app = applications.remove(idx);
+                                    applications.push(app);
+                                    mode_changed = true;
+                                }
                             }
                         }
                         _ => {}
