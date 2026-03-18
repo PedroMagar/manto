@@ -15,6 +15,7 @@ use std::time::Duration;
 
 enum Mode {
     Normal,
+    Moving  { app_idx: usize, offset_x: u16 },
     Resizing { app_idx: usize },
 }
 
@@ -95,7 +96,7 @@ fn main() {
                             write!(out, "{}Você clicou no botão!{}", terminal::FG_GREEN, terminal::RESET).unwrap();
                             out.flush().unwrap();
                         }
-                        // Space sobre uma janela: quina → resize, resto → traz para frente
+                        // Space sobre uma janela: quina → resize, título → mover, resto → traz para frente
                         Key::Char(' ') => {
                             if let Some(idx) = applications.iter().position(|app| {
                                 app.window().map_or(false, |win| {
@@ -104,6 +105,24 @@ fn main() {
                                 })
                             }) {
                                 mode = Mode::Resizing { app_idx: idx };
+                                mode_changed = true;
+                            } else if let Some(idx) = applications.iter().rposition(|app| {
+                                app.window().map_or(false, |win| {
+                                    pointer.y == win.position_y
+                                        && pointer.x > win.position_x
+                                        && pointer.x < win.position_x + win.width - 1
+                                })
+                            }) {
+                                let offset_x = pointer.x
+                                    .saturating_sub(applications[idx].window().unwrap().position_x);
+                                let final_idx = if idx != applications.len() - 1 {
+                                    let app = applications.remove(idx);
+                                    applications.push(app);
+                                    applications.len() - 1
+                                } else {
+                                    idx
+                                };
+                                mode = Mode::Moving { app_idx: final_idx, offset_x };
                                 mode_changed = true;
                             } else if let Some(idx) = applications.iter().rposition(|app| {
                                 app.window().map_or(false, |win| {
@@ -119,6 +138,18 @@ fn main() {
                                     mode_changed = true;
                                 }
                             }
+                        }
+                        _ => {}
+                    },
+
+                    Mode::Moving { .. } => match key {
+                        Key::Up    => pointer.move_up(),
+                        Key::Down  => pointer.move_down(last_size.1),
+                        Key::Left  => pointer.move_left(),
+                        Key::Right => pointer.move_right(last_size.0),
+                        Key::Char(' ') => {
+                            mode = Mode::Normal;
+                            mode_changed = true;
                         }
                         _ => {}
                     },
@@ -141,6 +172,14 @@ fn main() {
                         _ => {}
                     },
                 },
+            }
+
+            // Atualiza posição da janela em tempo real durante o movimento
+            if let Mode::Moving { app_idx, offset_x } = &mode {
+                if let Some(win) = applications[*app_idx].window_mut() {
+                    win.position_x = pointer.x.saturating_sub(*offset_x);
+                    win.position_y = pointer.y;
+                }
             }
 
             let moved = (pointer.x, pointer.y) != prev;
@@ -192,6 +231,7 @@ fn compute_render_state(
                 (None, None)
             }
         }
+        Mode::Moving { .. } => (None, None),
         Mode::Normal => (None, None),
     }
 }
