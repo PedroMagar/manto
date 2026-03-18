@@ -39,6 +39,32 @@ pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &st
     write!(out, "└{:─^1$}┘", "", w as usize - 2).unwrap();
 }
 
+/// Desenha uma aba vertical de largura 3.
+/// O título rola 1 char/segundo quando é maior que as linhas disponíveis.
+pub fn draw_tab(out: &mut impl Write, x: u16, y: u16, height: u16, title: &str, scroll_offset: usize) {
+    let content_rows = height.saturating_sub(2) as usize;
+    let chars: Vec<char> = title.chars().collect();
+    let len = chars.len();
+
+    terminal::move_to(out, x, y);
+    write!(out, "┌─").unwrap();
+
+    for i in 0..content_rows {
+        let ch = if len == 0 {
+            ' '
+        } else if len <= content_rows {
+            chars.get(i).copied().unwrap_or(' ')
+        } else {
+            chars[(scroll_offset + i) % len]
+        };
+        terminal::move_to(out, x, y + 1 + i as u16);
+        write!(out, "│{}", ch).unwrap();
+    }
+
+    terminal::move_to(out, x, y + height - 1);
+    write!(out, "└─").unwrap();
+}
+
 #[allow(dead_code)]
 pub fn draw_button(out: &mut impl Write, x: u16, y: u16, label: &str, hovered: bool) {
     terminal::move_to(out, x, y);
