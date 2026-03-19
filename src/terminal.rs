@@ -40,12 +40,3 @@ pub fn leave_alt_screen(out: &mut impl Write) {
 
 pub const RESET:        &str = "\x1b[0m";
 pub const REVERSE:      &str = "\x1b[7m";
-pub const FG_BLACK:     &str = "\x1b[30m";
-pub const FG_WHITE:     &str = "\x1b[37m";
-pub const FG_GREEN:     &str = "\x1b[32m";
-pub const BG_WHITE:     &str = "\x1b[47m";
-pub const BG_DARK_GREY: &str = "\x1b[100m";
-
-pub fn print_styled(out: &mut impl Write, text: &str, fg: &str, bg: &str) {
-    write!(out, "{}{}{}{}", fg, bg, text, RESET).unwrap();
-}

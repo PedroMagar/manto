@@ -129,12 +129,3 @@ pub fn draw_scrollbar(
     }
 }
 
-#[allow(dead_code)]
-pub fn draw_button(out: &mut impl Write, x: u16, y: u16, label: &str, hovered: bool) {
-    terminal::move_to(out, x, y);
-    if hovered {
-        terminal::print_styled(out, label, terminal::FG_BLACK, terminal::BG_WHITE);
-    } else {
-        terminal::print_styled(out, label, terminal::FG_WHITE, terminal::BG_DARK_GREY);
-    }
-}
