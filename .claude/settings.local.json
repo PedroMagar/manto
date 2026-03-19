@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(git -C d:/Projetos/manto log --all --oneline)",
+      "Bash(git -C d:/Projetos/manto show f665b7c -- src/main.rs)",
+      "Bash(git -C d:/Projetos/manto show 85c07ec -- src/main.rs)",
+      "Bash(git -C d:/Projetos/manto show d2aec45 -- src/main.rs)"
     ]
   }
 }

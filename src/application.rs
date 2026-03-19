@@ -5,6 +5,8 @@ use crate::window::Window;
 pub struct Application {
     pub title: String,
     pub display: DisplayMode,
+    /// Janelas de menu fecham ao perder o foco.
+    pub is_menu: bool,
 }
 
 pub enum DisplayMode {
@@ -15,7 +17,11 @@ pub enum DisplayMode {
 
 impl Application {
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window) }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: false }
+    }
+
+    pub fn menu(title: impl Into<String>, window: Window) -> Self {
+        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: true }
     }
 
     pub fn window(&self) -> Option<&Window> {

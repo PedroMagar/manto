@@ -5,7 +5,7 @@ mod pointer;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_tab, draw_scrollbar, tab_char_at, scrollbar_thumb};
+use gui::{draw_desktop, draw_tab, draw_scrollbar, tab_char_at, scrollbar_thumb, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X};
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -74,9 +74,10 @@ fn render(
     pointer: &Pointer,
     scroll_offset: usize,
     tab_scroll: usize,
+    path: &str,
 ) {
     terminal::clear(out);
-    draw_desktop(out, 1, w, h, "Manto");
+    draw_desktop(out, 1, w, h, "Manto", path);
 
     for app in applications {
         if let Some(win) = app.window() {
@@ -108,6 +109,13 @@ fn render(
         }
     }
 
+    // Hover no botão Start: inverte o bloco inteiro quando o cursor está sobre ele
+    let start_end = STATUS_START_X + STATUS_START.len() as u16;
+    if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
+        terminal::move_to(out, STATUS_START_X, h - 2);
+        write!(out, "{}{}{}", terminal::REVERSE, STATUS_START, terminal::RESET).unwrap();
+    }
+
     // Cursor unificado: ░ por padrão, negativo da célula clicável/borda em reverse video
     let effective_cursor = cursor_interaction.or_else(|| {
         let px = pointer.x;
@@ -132,6 +140,12 @@ fn render(
                     px, py, scroll_offset,
                 ));
             }
+        }
+
+        // Botão Start na barra de status
+        let start_end = STATUS_START_X + STATUS_START.len() as u16;
+        if py == h - 2 && px >= STATUS_START_X && px < start_end {
+            return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
         }
 
         // Borda da janela no topo
@@ -162,8 +176,9 @@ fn main() {
     let mut scroll_offset: usize = 0;
     let mut tab_scroll:    usize = 0;
     let mut last_space_time: Option<Clock> = None;
+    let current_path         = String::new();
     let mut last_size     = os::size();
-    let mut pointer       = Pointer::new(3, last_size.1 - 2);
+    let mut pointer       = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
     let mut applications = vec![
         Application::windowed("Test",    Window::new(2,  1, 17, 8, 0)),
@@ -173,7 +188,7 @@ fn main() {
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
 
     let mut last_check = Clock::now();
 
@@ -199,8 +214,27 @@ fn main() {
                             let sb_bot = last_size.1.saturating_sub(4);
                             let tab_x  = last_size.0.saturating_sub(3);
 
+                            // Botão Start: toggle do menu
+                            let start_end = STATUS_START_X + STATUS_START.len() as u16;
+                            if pointer.y == last_size.1 - 2
+                                && pointer.x >= STATUS_START_X
+                                && pointer.x < start_end
+                            {
+                                if let Some(idx) = applications.iter().position(|a| a.is_menu) {
+                                    applications.remove(idx);
+                                } else {
+                                    let usable_h = last_size.1.saturating_sub(4);
+                                    let win_h = (usable_h * 3 / 4).max(MIN_H);
+                                    let pos_y  = last_size.1.saturating_sub(3).saturating_sub(win_h);
+                                    applications.push(Application::menu(
+                                        "Start",
+                                        Window::new(2, pos_y, 20, win_h, 0).without_chrome(),
+                                    ));
+                                }
+                                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, last_size.1));
+                                mode_changed = true;
                             // Scrollbar (coluna mais à direita): metade superior sobe, inferior desce
-                            if pointer.x == sb_x {
+                            } else if pointer.x == sb_x {
                                 last_space_time = None;
                                 let mid = (sb_top + sb_bot) / 2;
                                 if pointer.y <= mid {
@@ -228,66 +262,84 @@ fn main() {
                             } else if let Some(top_idx) =
                                 topmost_window_at(&applications, pointer.x, pointer.y)
                             {
-                                let (is_minimize, is_close, is_resize, is_title, offset_x) = {
-                                    let win = applications[top_idx].window().unwrap();
-                                    let lx = win.position_x;
-                                    let rx = win.position_x + win.width - 1;
-                                    let ty = win.position_y;
-                                    let by = win.position_y + win.height - 1;
-                                    (
-                                        pointer.x == lx && pointer.y == ty,
-                                        pointer.x == rx && pointer.y == ty,
-                                        pointer.x == rx && pointer.y == by,
-                                        pointer.y == ty && pointer.x > lx && pointer.x < rx,
-                                        pointer.x.saturating_sub(lx),
-                                    )
-                                };
-                                let maximized = applications[top_idx].is_maximized();
-
-                                if is_minimize {
-                                    applications[top_idx].minimize();
-                                    mode_changed = true;
-                                } else if is_close {
-                                    applications.remove(top_idx);
-                                    tab_scroll = tab_scroll
-                                        .min(max_tab_scroll(&applications, last_size.1));
-                                    mode_changed = true;
-                                } else if is_resize && !maximized {
-                                    mode = Mode::Resizing { app_idx: top_idx };
-                                    mode_changed = true;
-                                } else if is_title {
-                                    // Duplo toque na barra de título → maximizar / restaurar
-                                    let now = Clock::now();
-                                    let is_double = last_space_time
-                                        .as_ref()
-                                        .map(|t| t.elapsed() < Duration::from_millis(300))
-                                        .unwrap_or(false);
-                                    last_space_time = if is_double { None } else { Some(now) };
-
-                                    if is_double {
-                                        if maximized {
-                                            applications[top_idx].restore_maximize();
-                                        } else {
-                                            applications[top_idx].maximize(last_size.0, last_size.1);
-                                        }
+                                // Fecha menu se a ação foi fora dele
+                                let mut skip = false;
+                                if let Some(menu_idx) = applications.iter().position(|a| a.is_menu) {
+                                    if top_idx != menu_idx {
+                                        applications.remove(menu_idx);
+                                        tab_scroll = tab_scroll
+                                            .min(max_tab_scroll(&applications, last_size.1));
                                         mode_changed = true;
-                                    } else if !maximized {
-                                        let final_idx = if top_idx != applications.len() - 1 {
+                                        skip = true; // top_idx inválido após remove
+                                    }
+                                }
+                                if !skip {
+                                    let (is_minimize, is_close, is_resize, is_title, offset_x,
+                                         win_minimizable, win_closable, win_draggable, win_resizable) = {
+                                        let win = applications[top_idx].window().unwrap();
+                                        let lx = win.position_x;
+                                        let rx = win.position_x + win.width - 1;
+                                        let ty = win.position_y;
+                                        let by = win.position_y + win.height - 1;
+                                        (
+                                            pointer.x == lx && pointer.y == ty,
+                                            pointer.x == rx && pointer.y == ty,
+                                            pointer.x == rx && pointer.y == by,
+                                            pointer.y == ty && pointer.x > lx && pointer.x < rx,
+                                            pointer.x.saturating_sub(lx),
+                                            win.minimizable,
+                                            win.closable,
+                                            win.draggable,
+                                            win.resizable,
+                                        )
+                                    };
+                                    let maximized = applications[top_idx].is_maximized();
+
+                                    if is_minimize && win_minimizable {
+                                        applications[top_idx].minimize();
+                                        mode_changed = true;
+                                    } else if is_close && win_closable {
+                                        applications.remove(top_idx);
+                                        tab_scroll = tab_scroll
+                                            .min(max_tab_scroll(&applications, last_size.1));
+                                        mode_changed = true;
+                                    } else if is_resize && !maximized && win_resizable {
+                                        mode = Mode::Resizing { app_idx: top_idx };
+                                        mode_changed = true;
+                                    } else if is_title && win_draggable {
+                                        // Duplo toque na barra de título → maximizar / restaurar
+                                        let now = Clock::now();
+                                        let is_double = last_space_time
+                                            .as_ref()
+                                            .map(|t| t.elapsed() < Duration::from_millis(300))
+                                            .unwrap_or(false);
+                                        last_space_time = if is_double { None } else { Some(now) };
+
+                                        if is_double {
+                                            if maximized {
+                                                applications[top_idx].restore_maximize();
+                                            } else {
+                                                applications[top_idx].maximize(last_size.0, last_size.1);
+                                            }
+                                            mode_changed = true;
+                                        } else if !maximized {
+                                            let final_idx = if top_idx != applications.len() - 1 {
+                                                let app = applications.remove(top_idx);
+                                                applications.push(app);
+                                                applications.len() - 1
+                                            } else {
+                                                top_idx
+                                            };
+                                            mode = Mode::Moving { app_idx: final_idx, offset_x };
+                                            mode_changed = true;
+                                        }
+                                    } else {
+                                        last_space_time = None;
+                                        if top_idx != applications.len() - 1 {
                                             let app = applications.remove(top_idx);
                                             applications.push(app);
-                                            applications.len() - 1
-                                        } else {
-                                            top_idx
-                                        };
-                                        mode = Mode::Moving { app_idx: final_idx, offset_x };
-                                        mode_changed = true;
-                                    }
-                                } else {
-                                    last_space_time = None;
-                                    if top_idx != applications.len() - 1 {
-                                        let app = applications.remove(top_idx);
-                                        applications.push(app);
-                                        mode_changed = true;
+                                            mode_changed = true;
+                                        }
                                     }
                                 }
                             }
@@ -363,7 +415,7 @@ fn main() {
             let moved = (pointer.x, pointer.y) != prev;
             if moved || mode_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
             }
         }
 
@@ -390,7 +442,7 @@ fn main() {
                 });
             if size_changed || needs_scroll {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
             }
             last_check = Clock::now();
         }

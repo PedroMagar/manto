@@ -2,7 +2,14 @@ use std::io::Write;
 
 use crate::terminal;
 
-pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &str) {
+/// Conteúdo fixo da barra de status (antes da área de input).
+pub const STATUS_BAR_PREFIX: &str = " Start | .> ";
+/// Texto e posição x do botão Start dentro da linha da barra (coluna 0 = │).
+/// Inclui os espaços de padding para a área de hover/click.
+pub const STATUS_START: &str = " Start ";
+pub const STATUS_START_X: u16 = 1; // logo após │
+
+pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &str, path: &str) {
     match theme {
         1 => {
             terminal::move_to(out, 0, 0);
@@ -27,16 +34,22 @@ pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &st
         _ => {}
     }
 
+    // Barra de status inferior
+    let inner = (w - 2) as usize;
     terminal::move_to(out, 0, h - 3);
-    write!(out, "┌{:─^1$}┐", "", w as usize - 2).unwrap();
+    if path.is_empty() {
+        write!(out, "┌{:─<1$}┐", "", inner).unwrap();
+    } else {
+        let label = format!("── {} ", path);
+        let fill = inner.saturating_sub(label.len());
+        write!(out, "┌{}{:─<2$}┐", label, "", fill).unwrap();
+    }
 
     terminal::move_to(out, 0, h - 2);
-    write!(out, "│").unwrap();
-    terminal::move_to(out, w - 1, h - 2);
-    write!(out, "│").unwrap();
+    write!(out, "│{:<1$}│", STATUS_BAR_PREFIX, inner).unwrap();
 
     terminal::move_to(out, 0, h - 1);
-    write!(out, "└{:─^1$}┘", "", w as usize - 2).unwrap();
+    write!(out, "└{:─<1$}┘", "", inner).unwrap();
 }
 
 /// Retorna o caractere do conteúdo de uma aba na linha `row` (0-indexed dentro dos content rows).
