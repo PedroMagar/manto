@@ -181,10 +181,14 @@ fn main() {
     let mut pointer       = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
     let mut applications = vec![
-        Application::windowed("Test",    Window::new(2,  1, 17, 8, 0)),
-        Application::windowed("Test2",   Window::new(22, 1, 17, 8, 0)),
-        Application::windowed("Test3",   Window::new(2,  11, 17, 8, 0)),
-        Application::windowed("Test4",   Window::new(22, 11, 17, 8, 0)),
+        // Conteúdo cabe na janela — sem scrollbars
+        Application::windowed("Test",  Window::new(2,  1,  17, 8, 0)),
+        // Conteúdo mais alto — scrollbar vertical
+        Application::windowed("Test2", Window::new(22, 1,  17, 8, 0).with_content(0,  20)),
+        // Conteúdo mais largo — scrollbar horizontal
+        Application::windowed("Test3", Window::new(2,  11, 17, 8, 0).with_content(40, 0)),
+        // Conteúdo maior nas duas direções — ambas as scrollbars
+        Application::windowed("Test4", Window::new(22, 11, 17, 8, 0).with_content(40, 20)),
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
@@ -274,6 +278,19 @@ fn main() {
                                     }
                                 }
                                 if !skip {
+                                    // Scroll interno da janela tem prioridade
+                                    let scroll_handled = if let Some(win) =
+                                        applications[top_idx].window_mut()
+                                    {
+                                        win.interact(pointer.x, pointer.y)
+                                    } else {
+                                        false
+                                    };
+                                    if scroll_handled {
+                                        mode_changed = true;
+                                    }
+
+                                    if !scroll_handled {
                                     let (is_minimize, is_close, is_resize, is_title, offset_x,
                                          win_minimizable, win_closable, win_draggable, win_resizable) = {
                                         let win = applications[top_idx].window().unwrap();
@@ -341,7 +358,8 @@ fn main() {
                                             mode_changed = true;
                                         }
                                     }
-                                }
+                                    } // if !scroll_handled
+                                } // if !skip
                             }
                         }
                         _ => {}
