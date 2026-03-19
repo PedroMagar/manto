@@ -2,10 +2,12 @@ mod application;
 mod gui;
 mod os;
 mod pointer;
+mod shell;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_tab, draw_scrollbar, tab_char_at, scrollbar_thumb, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X};
+use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel, tab_char_at, scrollbar_thumb, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X};
+use shell::{CommandEntry, tick_all};
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -15,8 +17,9 @@ use std::time::Duration;
 
 enum Mode {
     Normal,
-    Moving  { app_idx: usize, offset_x: u16 },
+    Moving   { app_idx: usize, offset_x: u16 },
     Resizing { app_idx: usize },
+    Typing,
 }
 
 /// Retorna o índice da janela visualmente no topo na posição (x, y).
@@ -75,17 +78,23 @@ fn render(
     scroll_offset: usize,
     tab_scroll: usize,
     path: &str,
+    typing_input: Option<&str>,
+    commands: &[CommandEntry],
+    panel_scroll: usize,
 ) {
     terminal::clear(out);
-    draw_desktop(out, 1, w, h, "Manto", path);
 
+    // 1. Fundo do desktop (sem barra de status)
+    draw_desktop(out, 1, w, h, "Manto");
+
+    // 2. Janelas
     for app in applications {
         if let Some(win) = app.window() {
             win.draw(out, &app.title);
         }
     }
 
-    // Abas e scrollbar
+    // 3. Abas e scrollbar lateral
     let minimized_count = applications.iter().filter(|a| a.is_minimized()).count();
     let tab_x = w.saturating_sub(3);
     let sb_x  = w.saturating_sub(1);
@@ -103,63 +112,76 @@ fn render(
         draw_scrollbar(out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
     }
 
+    // 4. Preview de redimensionamento
     if let Some((idx, pw, ph)) = resize_preview {
         if let Some(win) = applications[idx].window() {
             win.draw_preview(out, pw, ph);
         }
     }
 
-    // Hover no botão Start: inverte o bloco inteiro quando o cursor está sobre ele
+    // 5. Painel de comandos — sobre janelas
+    draw_command_panel(out, w, h, path, commands, panel_scroll);
+
+    // 6. Barra de status — sempre por cima de tudo
+    draw_status_bar(out, w, h, path, !commands.is_empty());
+
+    // 7. Hover no botão Start
     let start_end = STATUS_START_X + STATUS_START.len() as u16;
     if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
         terminal::move_to(out, STATUS_START_X, h - 2);
         write!(out, "{}{}{}", terminal::REVERSE, STATUS_START, terminal::RESET).unwrap();
     }
 
-    // Cursor unificado: ░ por padrão, negativo da célula clicável/borda em reverse video
-    let effective_cursor = cursor_interaction.or_else(|| {
-        let px = pointer.x;
-        let py = pointer.y;
+    // 8. Cursor: real (typing) ou ponteiro (░ / reverse)
+    if let Some(input) = typing_input {
+        let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
+        let display = if input.len() > max_len { &input[input.len() - max_len..] } else { input };
+        terminal::move_to(out, CMD_INPUT_X, h - 2);
+        write!(out, "{:<width$}", display, width = max_len).unwrap();
+        terminal::move_to(out, CMD_INPUT_X + display.len() as u16, h - 2);
+        terminal::show_cursor(out);
+    } else {
+        terminal::hide_cursor(out);
+        let effective_cursor = cursor_interaction.or_else(|| {
+            let px = pointer.x;
+            let py = pointer.y;
 
-        // Scrollbar
-        if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
-            let track_len = (sb_bot - sb_top + 1) as usize;
-            let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
-            let row = (py - sb_top) as usize;
-            return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
-        }
-
-        // Tab strip
-        if px >= tab_x && px < sb_x {
-            if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
-                .find(|&&(_, ty, th)| py >= ty && py < ty + th)
-            {
-                return Some(tab_char_at(
-                    tab_x, tab_y, tab_h,
-                    &applications[app_idx].title,
-                    px, py, scroll_offset,
-                ));
+            if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
+                let track_len = (sb_bot - sb_top + 1) as usize;
+                let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
+                let row = (py - sb_top) as usize;
+                return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
             }
-        }
 
-        // Botão Start na barra de status
-        let start_end = STATUS_START_X + STATUS_START.len() as u16;
-        if py == h - 2 && px >= STATUS_START_X && px < start_end {
-            return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
-        }
-
-        // Borda da janela no topo
-        if let Some(top_idx) = topmost_window_at(applications, px, py) {
-            if let Some(win) = applications[top_idx].window() {
-                if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
-                    return Some(ch);
+            if px >= tab_x && px < sb_x {
+                if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
+                    .find(|&&(_, ty, th)| py >= ty && py < ty + th)
+                {
+                    return Some(tab_char_at(
+                        tab_x, tab_y, tab_h,
+                        &applications[app_idx].title,
+                        px, py, scroll_offset,
+                    ));
                 }
             }
-        }
 
-        None
-    });
-    pointer.draw(out, effective_cursor);
+            let start_end = STATUS_START_X + STATUS_START.len() as u16;
+            if py == h - 2 && px >= STATUS_START_X && px < start_end {
+                return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
+            }
+
+            if let Some(top_idx) = topmost_window_at(applications, px, py) {
+                if let Some(win) = applications[top_idx].window() {
+                    if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
+                        return Some(ch);
+                    }
+                }
+            }
+
+            None
+        });
+        pointer.draw(out, effective_cursor);
+    }
 
     out.flush().unwrap();
 }
@@ -175,8 +197,11 @@ fn main() {
     let mut mode             = Mode::Normal;
     let mut scroll_offset: usize = 0;
     let mut tab_scroll:    usize = 0;
+    let mut panel_scroll:  usize = 0;
     let mut last_space_time: Option<Clock> = None;
-    let current_path         = String::new();
+    let current_path         = String::from("./");
+    let mut cmd_input        = String::new();
+    let mut commands: Vec<CommandEntry> = Vec::new();
     let mut last_size     = os::size();
     let mut pointer       = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
@@ -192,7 +217,9 @@ fn main() {
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
+    let in_shell = matches!(mode, Mode::Typing);
+    let shell_path = if in_shell { current_path.as_str() } else { "" };
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
 
     let mut last_check = Clock::now();
 
@@ -203,7 +230,8 @@ fn main() {
             let mut mode_changed = false;
 
             match key {
-                Key::Char('q') | Key::CtrlC => break,
+                Key::CtrlC => break,
+                Key::Char('q') if !matches!(mode, Mode::Typing) => break,
 
                 _ => match &mut mode {
                     Mode::Normal => match key {
@@ -212,13 +240,24 @@ fn main() {
                         Key::Left  => pointer.move_left(),
                         Key::Right => pointer.move_right(last_size.0),
 
-                        Key::Char(' ') => {
+                        Key::Home => {
+                            pointer.x = CMD_INPUT_X;
+                            pointer.y = last_size.1 - 2;
+                        }
+
+                        Key::Char(' ') | Key::Enter => {
                             let sb_x   = last_size.0.saturating_sub(1);
                             let sb_top = 1u16;
                             let sb_bot = last_size.1.saturating_sub(4);
                             let tab_x  = last_size.0.saturating_sub(3);
 
+                            // Área de comando na barra de status
+                            if pointer.y == last_size.1 - 2 && pointer.x >= CMD_INPUT_X {
+                                mode = Mode::Typing;
+                                panel_scroll = 0;
+                                mode_changed = true;
                             // Botão Start: toggle do menu
+                            } else {
                             let start_end = STATUS_START_X + STATUS_START.len() as u16;
                             if pointer.y == last_size.1 - 2
                                 && pointer.x >= STATUS_START_X
@@ -361,16 +400,52 @@ fn main() {
                                     } // if !scroll_handled
                                 } // if !skip
                             }
+                            } // else (não é área de comando)
                         }
                         _ => {}
                     },
+
+                    Mode::Typing => {
+                        match key {
+                            Key::Escape | Key::End => {
+                                mode = Mode::Normal;
+                                mode_changed = true;
+                            }
+                            Key::PageUp => {
+                                panel_scroll = panel_scroll.saturating_add(1);
+                                mode_changed = true;
+                            }
+                            Key::PageDown => {
+                                panel_scroll = panel_scroll.saturating_sub(1);
+                                mode_changed = true;
+                            }
+                            Key::Enter => {
+                                let trimmed = cmd_input.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    commands.push(CommandEntry::new(&trimmed));
+                                    cmd_input.clear();
+                                    panel_scroll = 0;
+                                }
+                                mode_changed = true;
+                            }
+                            Key::Backspace => {
+                                cmd_input.pop();
+                                mode_changed = true;
+                            }
+                            Key::Char(c) => {
+                                cmd_input.push(c);
+                                mode_changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
 
                     Mode::Moving { app_idx, .. } => match key {
                         Key::Up    => pointer.move_up(),
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
                         Key::Right => pointer.move_right(last_size.0),
-                        Key::Char(' ') => {
+                        Key::Char(' ') | Key::Enter => {
                             let idx = *app_idx;
                             let is_double = last_space_time
                                 .as_ref()
@@ -391,7 +466,7 @@ fn main() {
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
                         Key::Right => pointer.move_right(last_size.0),
-                        Key::Char(' ') => {
+                        Key::Char(' ') | Key::Enter => {
                             let idx = *app_idx;
                             if let Some(win) = applications[idx].window_mut() {
                                 win.width  = (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W);
@@ -433,12 +508,15 @@ fn main() {
             let moved = (pointer.x, pointer.y) != prev;
             if moved || mode_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
+                let in_shell = matches!(mode, Mode::Typing);
+                let shell_path = if in_shell { current_path.as_str() } else { "" };
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
             }
         }
 
         if last_check.elapsed() >= Duration::from_secs(1) {
             scroll_offset = scroll_offset.wrapping_add(1);
+            let cmds_changed = tick_all(&mut commands);
             let new_size = os::size();
             let size_changed = new_size != last_size;
             if size_changed {
@@ -458,9 +536,11 @@ fn main() {
                     is_hovered
                         && applications[idx].title.chars().count() > tab_h.saturating_sub(2) as usize
                 });
-            if size_changed || needs_scroll {
+            if size_changed || needs_scroll || cmds_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, &current_path);
+                let in_shell = matches!(mode, Mode::Typing);
+                let shell_path = if in_shell { current_path.as_str() } else { "" };
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
             }
             last_check = Clock::now();
         }
@@ -489,6 +569,7 @@ fn compute_render_state(
             }
         }
         Mode::Moving { .. } => (None, None),
-        Mode::Normal      => (None, None),
+        Mode::Typing => (None, None),
+        Mode::Normal        => (None, None),
     }
 }

@@ -59,8 +59,13 @@ pub enum Key {
     Left,
     Right,
     Enter,
+    Backspace,
+    Escape,
+    End,
+    Home,
+    PageUp,
+    PageDown,
     CtrlC,
-    Unknown,
 }
 
 // ── Plataforma ────────────────────────────────────────────────────────────────
@@ -129,40 +134,57 @@ mod platform {
     }
 
     pub fn read_key() -> Key {
-        let mut buf = [0u8; 1];
-        std::io::stdin().read_exact(&mut buf).unwrap();
-        match buf[0] {
-            3  => Key::CtrlC,
-            13 => Key::Enter,
-            27 => {
-                if poll(10) {
-                    let mut seq = [0u8; 2];
-                    std::io::stdin().read_exact(&mut seq).unwrap();
-                    if seq[0] == b'[' {
-                        match seq[1] {
-                            b'A' => Key::Up,
-                            b'B' => Key::Down,
-                            b'C' => Key::Right,
-                            b'D' => Key::Left,
-                            _    => Key::Unknown,
+        loop {
+            let mut buf = [0u8; 1];
+            std::io::stdin().read_exact(&mut buf).unwrap();
+            match buf[0] {
+                3        => return Key::CtrlC,
+                8 | 127  => return Key::Backspace,
+                13       => return Key::Enter,
+                27 => {
+                    if poll(10) {
+                        let mut seq = [0u8; 2];
+                        std::io::stdin().read_exact(&mut seq).unwrap();
+                        if seq[0] == b'[' {
+                            match seq[1] {
+                                b'A' => return Key::Up,
+                                b'B' => return Key::Down,
+                                b'C' => return Key::Right,
+                                b'D' => return Key::Left,
+                                b'F' => return Key::End,
+                                b'H' => return Key::Home,
+                                b'5' | b'6' => {
+                                    let mut term = [0u8; 1];
+                                    std::io::stdin().read_exact(&mut term).unwrap();
+                                    if term[0] == b'~' {
+                                        if seq[1] == b'5' { return Key::PageUp; }
+                                        else { return Key::PageDown; }
+                                    }
+                                    continue;
+                                }
+                                _    => continue,
+                            }
                         }
                     } else {
-                        Key::Unknown
+                        return Key::Escape;
                     }
-                } else {
-                    Key::Unknown
                 }
+                b if b.is_ascii_graphic() || b == b' ' => return Key::Char(buf[0] as char),
+                _ => continue,
             }
-            b if b.is_ascii() => Key::Char(b as char),
-            _ => Key::Unknown,
         }
     }
 }
 
 // ─── Windows ─────────────────────────────────────────────────────────────────
+// Usa ReadConsoleInputW em vez de ReadFile+VT para evitar bloqueio:
+// WaitForSingleObject sinaliza para qualquer evento de console (foco, etc.),
+// enquanto ReadFile fica bloqueado aguardando bytes VT que nunca chegam.
+// Com ReadConsoleInputW lemos registros diretamente e descartamos não-teclado.
 #[cfg(windows)]
 mod platform {
     use super::Key;
+    use std::time::{Duration, Instant};
 
     type Handle = *mut u8;
     type Bool   = i32;
@@ -178,11 +200,17 @@ mod platform {
     const ENABLE_PROCESSED_INPUT:             Dword = 0x0001;
     const ENABLE_MOUSE_INPUT:                 Dword = 0x0010;
     const ENABLE_WINDOW_INPUT:                Dword = 0x0008;
-    const ENABLE_VIRTUAL_TERMINAL_INPUT:      Dword = 0x0200;
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
     const ENABLE_PROCESSED_OUTPUT:            Dword = 0x0001;
 
-    const WAIT_OBJECT_0: Dword = 0;
+    const WAIT_OBJECT_0:   Dword = 0;
+    const KEY_EVENT_TYPE:  Word  = 0x0001;
+    const LEFT_CTRL:       Dword = 0x0008;
+    const RIGHT_CTRL:      Dword = 0x0004;
+
+    // INPUT_RECORD: WORD EventType (2) + WORD pad (2) + union Event (16 bytes)
+    #[repr(C)]
+    struct InputRecord { event_type: Word, _pad: Word, event: [u8; 16] }
 
     #[repr(C)] struct Coord        { x: Short, y: Short }
     #[repr(C)] struct SmallRect    { left: Short, top: Short, right: Short, bottom: Short }
@@ -200,11 +228,25 @@ mod platform {
         fn SetConsoleMode(h: Handle, mode: Dword)      -> Bool;
         fn GetConsoleScreenBufferInfo(h: Handle, info: *mut ScreenBufInfo) -> Bool;
         fn WaitForSingleObject(h: Handle, ms: Dword)   -> Dword;
-        fn ReadFile(h: Handle, buf: *mut u8, to_read: Dword, read: *mut Dword, overlapped: *mut u8) -> Bool;
+        fn ReadConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
+        fn PeekConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
+        fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut Dword) -> Bool;
     }
 
     static mut ORIG_IN_MODE:  Dword = 0;
     static mut ORIG_OUT_MODE: Dword = 0;
+
+    // Helpers para ler campos do KEY_EVENT_RECORD dentro de event: [u8; 16]
+    // KEY_EVENT_RECORD layout: bKeyDown(i32@0) wRepeat(u16@4) wVK(u16@6)
+    //   wScan(u16@8) uChar/WCHAR(u16@10) dwCtrl(u32@12)
+    fn ke_key_down(e: &[u8; 16]) -> bool { i32::from_ne_bytes([e[0],e[1],e[2],e[3]]) != 0 }
+    fn ke_vk(e: &[u8; 16])       -> u16  { u16::from_ne_bytes([e[6], e[7]]) }
+    fn ke_char(e: &[u8; 16])     -> u16  { u16::from_ne_bytes([e[10],e[11]]) }
+    fn ke_ctrl(e: &[u8; 16])     -> u32  { u32::from_ne_bytes([e[12],e[13],e[14],e[15]]) }
+
+    fn is_key_down(rec: &InputRecord) -> bool {
+        rec.event_type == KEY_EVENT_TYPE && ke_key_down(&rec.event)
+    }
 
     pub fn enable_raw_mode() {
         unsafe {
@@ -213,12 +255,10 @@ mod platform {
             GetConsoleMode(hin,  &raw mut ORIG_IN_MODE);
             GetConsoleMode(hout, &raw mut ORIG_OUT_MODE);
 
-            // Desativa mouse e window events para evitar que o handle sinalize
-            // sem ter dados de teclado, o que causaria bloqueio no ReadFile.
-            let new_in = (ORIG_IN_MODE
+            // Sem VT input: usamos ReadConsoleInputW e lemos registros diretamente
+            let new_in = ORIG_IN_MODE
                 & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT
-                    | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT))
-                | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                    | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT);
             SetConsoleMode(hin, new_in);
 
             let new_out = ORIG_OUT_MODE
@@ -248,47 +288,83 @@ mod platform {
         }
     }
 
-    pub fn poll(timeout_ms: u64) -> bool {
+    /// Drena eventos não-KEY_DOWN da fila. Retorna true se sobrou um KEY_DOWN.
+    fn drain_non_key(hin: Handle) -> bool {
         unsafe {
-            let hin = GetStdHandle(STD_INPUT_HANDLE);
-            WaitForSingleObject(hin, timeout_ms as Dword) == WAIT_OBJECT_0
+            loop {
+                let mut count = 0u32;
+                GetNumberOfConsoleInputEvents(hin, &mut count);
+                if count == 0 { return false; }
+
+                let mut rec = std::mem::zeroed::<InputRecord>();
+                let mut peeked = 0u32;
+                PeekConsoleInputW(hin, &mut rec, 1, &mut peeked);
+                if peeked == 0 { return false; }
+
+                if is_key_down(&rec) { return true; }
+
+                // Descarta evento inútil (key up, mouse, foco, etc.)
+                let mut read = 0u32;
+                ReadConsoleInputW(hin, &mut rec, 1, &mut read);
+            }
         }
     }
 
-    fn read_byte() -> u8 {
+    /// Retorna true se houver KEY_DOWN disponível dentro do timeout.
+    pub fn poll(timeout_ms: u64) -> bool {
         unsafe {
             let hin = GetStdHandle(STD_INPUT_HANDLE);
-            let mut byte = 0u8;
-            let mut read = 0u32;
-            ReadFile(hin, &mut byte, 1, &mut read, std::ptr::null_mut());
-            byte
+            if drain_non_key(hin) { return true; }
+
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            loop {
+                let now = Instant::now();
+                if now >= deadline { return false; }
+                let rem = (deadline - now).as_millis().min(50) as Dword;
+
+                if WaitForSingleObject(hin, rem) == WAIT_OBJECT_0 {
+                    if drain_non_key(hin) { return true; }
+                } else {
+                    return false;
+                }
+            }
         }
     }
 
     pub fn read_key() -> Key {
-        match read_byte() {
-            3  => Key::CtrlC,
-            13 => Key::Enter,
-            27 => {
-                if poll(10) {
-                    let b1 = read_byte();
-                    if b1 == b'[' && poll(10) {
-                        match read_byte() {
-                            b'A' => Key::Up,
-                            b'B' => Key::Down,
-                            b'C' => Key::Right,
-                            b'D' => Key::Left,
-                            _    => Key::Unknown,
-                        }
-                    } else {
-                        Key::Unknown
-                    }
-                } else {
-                    Key::Unknown
+        unsafe {
+            let hin = GetStdHandle(STD_INPUT_HANDLE);
+            loop {
+                let mut rec = std::mem::zeroed::<InputRecord>();
+                let mut read = 0u32;
+                ReadConsoleInputW(hin, &mut rec, 1, &mut read);
+                if read == 0 || !is_key_down(&rec) { continue; }
+
+                let vk   = ke_vk(&rec.event);
+                let ch   = ke_char(&rec.event);
+                let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
+
+                if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
+
+                match vk {
+                    0x08 => return Key::Backspace,
+                    0x0D => return Key::Enter,
+                    0x1B => return Key::Escape,
+                    0x21 => return Key::PageUp,
+                    0x22 => return Key::PageDown,
+                    0x23 => return Key::End,
+                    0x24 => return Key::Home,
+                    0x26 => return Key::Up,
+                    0x28 => return Key::Down,
+                    0x25 => return Key::Left,
+                    0x27 => return Key::Right,
+                    _ => {}
+                }
+
+                if let Some(c) = char::from_u32(ch as u32) {
+                    if c.is_ascii_graphic() || c == ' ' { return Key::Char(c); }
                 }
             }
-            b if b.is_ascii() => Key::Char(b as char),
-            _ => Key::Unknown,
         }
     }
 }
