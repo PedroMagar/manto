@@ -66,6 +66,8 @@ pub enum Key {
     PageUp,
     PageDown,
     CtrlC,
+    CtrlEnter,
+    CtrlT,
 }
 
 // ── Plataforma ────────────────────────────────────────────────────────────────
@@ -139,6 +141,7 @@ mod platform {
             std::io::stdin().read_exact(&mut buf).unwrap();
             match buf[0] {
                 3        => return Key::CtrlC,
+                20       => return Key::CtrlT,
                 8 | 127  => return Key::Backspace,
                 13       => return Key::Enter,
                 27 => {
@@ -231,6 +234,7 @@ mod platform {
         fn ReadConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
         fn PeekConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
         fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut Dword) -> Bool;
+        fn GetKeyState(n_virt_key: i32) -> i16;
     }
 
     static mut ORIG_IN_MODE:  Dword = 0;
@@ -345,10 +349,18 @@ mod platform {
                 let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
 
                 if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
+                if ctrl && vk == 0x54 { return Key::CtrlT; }
+
+                // Para Ctrl+Enter usamos GetKeyState (estado real-time) porque
+                // dwControlKeyState pode não reportar Ctrl corretamente neste contexto.
+                if vk == 0x0D {
+                    let ctrl_held = ctrl || (GetKeyState(0x11) as u16 & 0x8000 != 0);
+                    if ctrl_held { return Key::CtrlEnter; }
+                    return Key::Enter;
+                }
 
                 match vk {
                     0x08 => return Key::Backspace,
-                    0x0D => return Key::Enter,
                     0x1B => return Key::Escape,
                     0x21 => return Key::PageUp,
                     0x22 => return Key::PageDown,

@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::terminal;
+use crate::ansi;
 
 pub struct Pointer {
     pub x: u16,
@@ -37,10 +37,10 @@ impl Pointer {
     /// `interaction`: None = cursor normal (░)
     ///                Some(c) = cursor interativo — mostra `c` em reverse video
     pub fn draw(&self, out: &mut impl Write, interaction: Option<char>) {
-        terminal::move_to(out, self.x, self.y);
+        ansi::move_to(out, self.x, self.y);
         match interaction {
             None    => write!(out, "░").unwrap(),
-            Some(c) => write!(out, "{}{}{}", terminal::REVERSE, c, terminal::RESET).unwrap(),
+            Some(c) => write!(out, "{}{}{}", ansi::REVERSE, c, ansi::RESET).unwrap(),
         }
     }
 }

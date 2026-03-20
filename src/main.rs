@@ -1,14 +1,17 @@
+mod ansi;
 mod application;
+mod cmd;
 mod gui;
 mod os;
 mod pointer;
-mod shell;
-mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel, tab_char_at, scrollbar_thumb, desktop_at, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X, DESKTOP_AREA_LEN};
-use shell::{CommandEntry, tick_all};
-pub use application::Application;
+use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel,
+          draw_terminal_content, tab_char_at, scrollbar_thumb, desktop_at,
+          STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X, DESKTOP_AREA_LEN,
+          TERMINAL_INPUT_PREFIX};
+use cmd::{CommandEntry, tick_all};
+pub use application::{Application, TerminalState};
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
 use pointer::Pointer;
@@ -17,9 +20,10 @@ use std::time::Duration;
 
 enum Mode {
     Normal,
-    Moving   { app_idx: usize, offset_x: u16 },
-    Resizing { app_idx: usize },
+    Moving          { app_idx: usize, offset_x: u16 },
+    Resizing        { app_idx: usize },
     Typing,
+    TerminalFocus   { app_idx: usize },
 }
 
 /// Retorna o índice da janela visualmente no topo na posição (x, y).
@@ -82,16 +86,25 @@ fn render(
     commands: &[CommandEntry],
     panel_scroll: usize,
     current_desktop: usize,
+    // Índice e input do terminal com foco para exibir cursor real.
+    focused_terminal: Option<(usize, &str)>,
 ) {
-    terminal::clear(out);
+    ansi::clear(out);
 
     // 1. Fundo do desktop (sem barra de status)
     draw_desktop(out, 1, w, h, "Manto");
 
-    // 2. Janelas
+    // 2. Janelas (chrome)
     for app in applications {
         if let Some(win) = app.window() {
             win.draw(out, &app.title);
+        }
+    }
+
+    // 2.5. Conteúdo das janelas terminais (sobre o chrome já desenhado)
+    for app in applications.iter() {
+        if let (Some(term), Some(win)) = (app.terminal.as_ref(), app.window()) {
+            draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
         }
     }
 
@@ -129,28 +142,44 @@ fn render(
     // 7. Hover no botão Start
     let start_end = STATUS_START_X + STATUS_START.len() as u16;
     if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
-        terminal::move_to(out, STATUS_START_X, h - 2);
-        write!(out, "{}{}{}", terminal::REVERSE, STATUS_START, terminal::RESET).unwrap();
+        ansi::move_to(out, STATUS_START_X, h - 2);
+        write!(out, "{}{}{}", ansi::REVERSE, STATUS_START, ansi::RESET).unwrap();
     }
 
     // 7.5. Hover nos botões de desktop
     if let Some(d) = desktop_at(pointer.x, pointer.y, w, h) {
         let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
         let sep_x  = base_x + (d as u16 - 1) * 4;
-        terminal::move_to(out, sep_x + 1, h - 2);
-        write!(out, "{} {} {}", terminal::REVERSE, d, terminal::RESET).unwrap();
+        ansi::move_to(out, sep_x + 1, h - 2);
+        write!(out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
     }
 
-    // 8. Cursor: real (typing) ou ponteiro (░ / reverse)
+    // 8. Cursor: real (typing / terminal focus) ou ponteiro (░ / reverse)
     if let Some(input) = typing_input {
-        let max_len = (w - 1).saturating_sub(CMD_INPUT_X + DESKTOP_AREA_LEN) as usize;
+        let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
         let display = if input.len() > max_len { &input[input.len() - max_len..] } else { input };
-        terminal::move_to(out, CMD_INPUT_X, h - 2);
+        ansi::move_to(out, CMD_INPUT_X, h - 2);
         write!(out, "{:<width$}", display, width = max_len).unwrap();
-        terminal::move_to(out, CMD_INPUT_X + display.len() as u16, h - 2);
-        terminal::show_cursor(out);
+        ansi::move_to(out, CMD_INPUT_X + display.len() as u16, h - 2);
+        ansi::show_cursor(out);
+    } else if let Some((term_idx, term_input)) = focused_terminal {
+        // Cursor real dentro da janela de terminal com foco
+        if let Some(win) = applications.get(term_idx).and_then(|a| a.window()) {
+            if win.height >= 5 {
+                let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
+                let inner_w    = (win.width - 2) as usize;
+                let max_len    = inner_w.saturating_sub(prefix_len);
+                let display    = if term_input.len() > max_len { &term_input[term_input.len() - max_len..] } else { term_input };
+                let cursor_x   = win.position_x + 1 + prefix_len as u16;
+                let cursor_y   = win.position_y + win.height - 2;
+                ansi::move_to(out, cursor_x, cursor_y);
+                write!(out, "{:<width$}", display, width = max_len).unwrap();
+                ansi::move_to(out, cursor_x + display.len() as u16, cursor_y);
+                ansi::show_cursor(out);
+            }
+        }
     } else {
-        terminal::hide_cursor(out);
+        ansi::hide_cursor(out);
         let effective_cursor = cursor_interaction.or_else(|| {
             let px = pointer.x;
             let py = pointer.y;
@@ -206,8 +235,8 @@ fn main() {
     let mut out = Writer::new();
 
     os::enable_raw_mode();
-    terminal::enter_alt_screen(&mut out);
-    terminal::hide_cursor(&mut out);
+    ansi::enter_alt_screen(&mut out);
+    ansi::hide_cursor(&mut out);
     out.flush().unwrap();
 
     let mut mode             = Mode::Normal;
@@ -215,6 +244,7 @@ fn main() {
     let mut tab_scroll:       usize = 0;
     let mut panel_scroll:     usize = 0;
     let mut current_desktop:  usize = 1;
+    let mut next_terminal_id: usize = 1;
     let mut last_space_time: Option<Clock> = None;
     let current_path         = String::from("./");
     let mut cmd_input        = String::new();
@@ -234,9 +264,12 @@ fn main() {
     ];
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-    let in_shell = matches!(mode, Mode::Typing);
-    let shell_path = if in_shell { current_path.as_str() } else { "" };
-    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
+    let in_shell     = matches!(mode, Mode::Typing);
+    let shell_path   = if in_shell { current_path.as_str() } else { "" };
+    let focused_term = if let Mode::TerminalFocus { app_idx } = &mode {
+        applications.get(*app_idx).and_then(|a| a.terminal.as_ref()).map(|t| (*app_idx, t.cmd_input.as_str()))
+    } else { None };
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop, focused_term);
 
     let mut last_check = Clock::now();
 
@@ -249,6 +282,24 @@ fn main() {
             match key {
                 Key::CtrlC => break,
                 Key::Char('q') if !matches!(mode, Mode::Typing) => break,
+
+                // Ctrl+T: novo terminal vazio, de qualquer modo.
+                Key::CtrlT => {
+                    let id = next_terminal_id;
+                    next_terminal_id += 1;
+                    let title = format!("Terminal {}", id);
+                    let usable_h = last_size.1.saturating_sub(4);
+                    let tw = (last_size.0 / 2).max(30).min(last_size.0.saturating_sub(6));
+                    let th = (usable_h * 2 / 3).max(8).min(usable_h);
+                    let tx = (last_size.0.saturating_sub(tw)) / 2;
+                    let ty = 1 + usable_h.saturating_sub(th) / 2;
+                    let win = Window::new(tx, ty, tw, th, 0);
+                    applications.push(Application::terminal_window(
+                        title, win, current_path.clone(), Vec::new(),
+                    ));
+                    mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
+                    mode_changed = true;
+                }
 
                 _ => match &mut mode {
                     Mode::Normal => match key {
@@ -350,7 +401,26 @@ fn main() {
                                         mode_changed = true;
                                     }
 
-                                    if !scroll_handled {
+                                    // Clique na linha de input de janela terminal
+                                    let is_terminal_input = {
+                                        let app = &applications[top_idx];
+                                        app.terminal.is_some() && app.window().map_or(false, |win| {
+                                            win.height >= 5
+                                                && pointer.y == win.position_y + win.height - 2
+                                                && pointer.x > win.position_x
+                                                && pointer.x < win.position_x + win.width - 1
+                                        })
+                                    };
+                                    if is_terminal_input && !scroll_handled {
+                                        if top_idx != applications.len() - 1 {
+                                            let app = applications.remove(top_idx);
+                                            applications.push(app);
+                                        }
+                                        mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
+                                        mode_changed = true;
+                                    }
+
+                                    if !scroll_handled && !is_terminal_input {
                                     let (is_minimize, is_close, is_resize, is_title, offset_x,
                                          win_minimizable, win_closable, win_draggable, win_resizable) = {
                                         let win = applications[top_idx].window().unwrap();
@@ -418,7 +488,7 @@ fn main() {
                                             mode_changed = true;
                                         }
                                     }
-                                    } // if !scroll_handled
+                                    } // if !scroll_handled && !is_terminal_input
                                 } // if !skip
                             }
                             } // else (não é área de comando)
@@ -430,6 +500,28 @@ fn main() {
                         match key {
                             Key::Escape | Key::End => {
                                 mode = Mode::Normal;
+                                mode_changed = true;
+                            }
+                            // Ctrl+Enter: destaca o terminal para uma janela flutuante.
+                            Key::CtrlEnter => {
+                                let id = next_terminal_id;
+                                next_terminal_id += 1;
+                                let title = format!("Terminal {}", id);
+                                // Área utilizável: linhas 1..=h-4 (dock ocupa h-3..h-1).
+                                let usable_h = last_size.1.saturating_sub(4); // = h-4 = último row válido
+                                let tw = (last_size.0 / 2).max(30).min(last_size.0.saturating_sub(6));
+                                let th = (usable_h * 2 / 3).max(8).min(usable_h);
+                                let tx = (last_size.0.saturating_sub(tw)) / 2;
+                                let ty = 1 + usable_h.saturating_sub(th) / 2;
+                                let win  = Window::new(tx, ty, tw, th, 0);
+                                let cmds = std::mem::take(&mut commands);
+                                cmd_input.clear();
+                                panel_scroll = 0;
+                                applications.push(Application::terminal_window(
+                                    title, win, current_path.clone(), cmds,
+                                ));
+                                // Foca imediatamente a nova janela terminal.
+                                mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
                                 mode_changed = true;
                             }
                             Key::PageUp => {
@@ -498,6 +590,52 @@ fn main() {
                         }
                         _ => {}
                     },
+
+                    Mode::TerminalFocus { app_idx } => {
+                        let idx = *app_idx;
+                        match key {
+                            Key::Escape | Key::End => {
+                                mode = Mode::Normal;
+                                mode_changed = true;
+                            }
+                            Key::PageUp => {
+                                if let Some(t) = applications[idx].terminal.as_mut() {
+                                    t.panel_scroll = t.panel_scroll.saturating_add(1);
+                                    mode_changed = true;
+                                }
+                            }
+                            Key::PageDown => {
+                                if let Some(t) = applications[idx].terminal.as_mut() {
+                                    t.panel_scroll = t.panel_scroll.saturating_sub(1);
+                                    mode_changed = true;
+                                }
+                            }
+                            Key::Enter => {
+                                if let Some(t) = applications[idx].terminal.as_mut() {
+                                    let trimmed = t.cmd_input.trim().to_string();
+                                    if !trimmed.is_empty() {
+                                        t.commands.push(CommandEntry::new(&trimmed));
+                                        t.cmd_input.clear();
+                                        t.panel_scroll = 0;
+                                    }
+                                    mode_changed = true;
+                                }
+                            }
+                            Key::Backspace => {
+                                if let Some(t) = applications[idx].terminal.as_mut() {
+                                    t.cmd_input.pop();
+                                    mode_changed = true;
+                                }
+                            }
+                            Key::Char(c) => {
+                                if let Some(t) = applications[idx].terminal.as_mut() {
+                                    t.cmd_input.push(c);
+                                    mode_changed = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
                 },
             }
 
@@ -529,15 +667,21 @@ fn main() {
             let moved = (pointer.x, pointer.y) != prev;
             if moved || mode_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                let in_shell = matches!(mode, Mode::Typing);
-                let shell_path = if in_shell { current_path.as_str() } else { "" };
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
+                let in_shell     = matches!(mode, Mode::Typing);
+                let shell_path   = if in_shell { current_path.as_str() } else { "" };
+                let focused_term = if let Mode::TerminalFocus { app_idx } = &mode {
+                    applications.get(*app_idx).and_then(|a| a.terminal.as_ref()).map(|t| (*app_idx, t.cmd_input.as_str()))
+                } else { None };
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop, focused_term);
             }
         }
 
         if last_check.elapsed() >= Duration::from_secs(1) {
             scroll_offset = scroll_offset.wrapping_add(1);
-            let cmds_changed = tick_all(&mut commands);
+            let cmds_changed = tick_all(&mut commands)
+                || applications.iter_mut().any(|a| {
+                    a.terminal.as_mut().map_or(false, |t| t.tick())
+                });
             let new_size = os::size();
             let size_changed = new_size != last_size;
             if size_changed {
@@ -559,16 +703,19 @@ fn main() {
                 });
             if size_changed || needs_scroll || cmds_changed {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
-                let in_shell = matches!(mode, Mode::Typing);
-                let shell_path = if in_shell { current_path.as_str() } else { "" };
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
+                let in_shell     = matches!(mode, Mode::Typing);
+                let shell_path   = if in_shell { current_path.as_str() } else { "" };
+                let focused_term = if let Mode::TerminalFocus { app_idx } = &mode {
+                    applications.get(*app_idx).and_then(|a| a.terminal.as_ref()).map(|t| (*app_idx, t.cmd_input.as_str()))
+                } else { None };
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop, focused_term);
             }
             last_check = Clock::now();
         }
     }
 
-    terminal::leave_alt_screen(&mut out);
-    terminal::show_cursor(&mut out);
+    ansi::leave_alt_screen(&mut out);
+    ansi::show_cursor(&mut out);
     out.flush().unwrap();
     os::disable_raw_mode();
 }
@@ -589,8 +736,9 @@ fn compute_render_state(
                 (None, None)
             }
         }
-        Mode::Moving { .. } => (None, None),
-        Mode::Typing => (None, None),
-        Mode::Normal        => (None, None),
+        Mode::Moving { .. }          => (None, None),
+        Mode::Typing                 => (None, None),
+        Mode::TerminalFocus { .. }   => (None, None),
+        Mode::Normal                 => (None, None),
     }
 }

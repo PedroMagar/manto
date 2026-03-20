@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::terminal;
+use crate::ansi;
 
 pub const MIN_W: u16 = 5;
 pub const MIN_H: u16 = 3;
@@ -78,29 +78,29 @@ impl Window {
         let vh = self.visible_h();
 
         // Borda superior
-        terminal::move_to(out, lx, ty);
+        ansi::move_to(out, lx, ty);
         write!(out, "┌{:─^1$}┐", format!(" {} ", title), vw).unwrap();
 
         // Limpa interior
         for i in 1..(self.height - 1) {
-            terminal::move_to(out, lx + 1, ty + i);
+            ansi::move_to(out, lx + 1, ty + i);
             write!(out, "{:1$}", "", vw).unwrap();
         }
 
         // Coluna esquerda
         for i in 1..(self.height - 1) {
-            terminal::move_to(out, lx, ty + i);
+            ansi::move_to(out, lx, ty + i);
             write!(out, "│").unwrap();
         }
 
         // Coluna direita: sempre borda
         for i in 1..(self.height - 1) {
-            terminal::move_to(out, rx, ty + i);
+            ansi::move_to(out, rx, ty + i);
             write!(out, "│").unwrap();
         }
 
         // Borda inferior: sempre borda
-        terminal::move_to(out, lx, by);
+        ansi::move_to(out, lx, by);
         write!(out, "└{:─<1$}┘", "", vw).unwrap();
 
         // Scrollbar horizontal interior: penúltima linha, lx+1 .. rx-1
@@ -108,7 +108,7 @@ impl Window {
             let htrack = vw.saturating_sub(if self.has_vscroll() { 1 } else { 0 });
             let (htp, htl) = Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
             for i in 0..htrack {
-                terminal::move_to(out, lx + 1 + i as u16, by - 1);
+                ansi::move_to(out, lx + 1 + i as u16, by - 1);
                 write!(out, "{}", Self::scroll_char(htp, htl, i)).unwrap();
             }
         }
@@ -118,7 +118,7 @@ impl Window {
             let vtrack = vh.saturating_sub(if self.has_hscroll() { 1 } else { 0 });
             let (vtp, vtl) = Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
             for i in 0..vtrack {
-                terminal::move_to(out, rx - 1, ty + 1 + i as u16);
+                ansi::move_to(out, rx - 1, ty + 1 + i as u16);
                 write!(out, "{}", Self::scroll_char(vtp, vtl, i)).unwrap();
             }
         }
@@ -226,7 +226,7 @@ impl Window {
         let new_bottom_y  = self.position_y + new_h - 1;
 
         if new_w > self.width {
-            terminal::move_to(out, orig_right_x + 1, self.position_y);
+            ansi::move_to(out, orig_right_x + 1, self.position_y);
             for _ in 0..(new_w - self.width - 1) {
                 write!(out, "─").unwrap();
             }
@@ -237,25 +237,25 @@ impl Window {
             if i == self.height - 1 && new_right_x == orig_right_x {
                 continue;
             }
-            terminal::move_to(out, new_right_x, self.position_y + i);
+            ansi::move_to(out, new_right_x, self.position_y + i);
             write!(out, "│").unwrap();
         }
 
         if new_h > self.height {
             for i in self.height..(new_h - 1) {
-                terminal::move_to(out, self.position_x, self.position_y + i);
+                ansi::move_to(out, self.position_x, self.position_y + i);
                 write!(out, "│").unwrap();
             }
         }
 
         if new_h == self.height && new_w > self.width {
-            terminal::move_to(out, orig_right_x + 1, orig_bottom_y);
+            ansi::move_to(out, orig_right_x + 1, orig_bottom_y);
             for _ in 0..(new_w - self.width - 1) {
                 write!(out, "─").unwrap();
             }
             write!(out, "┼").unwrap();
         } else {
-            terminal::move_to(out, self.position_x, new_bottom_y);
+            ansi::move_to(out, self.position_x, new_bottom_y);
             write!(out, "└{:─^1$}", "", new_w as usize - 2).unwrap();
             write!(out, "┼").unwrap();
         }

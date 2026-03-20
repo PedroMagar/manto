@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::{shell::{CommandEntry, CommandStatus}, terminal};
+use crate::{cmd::{CommandEntry, CommandStatus}, ansi, window::Window};
 
 /// Conteúdo fixo da barra de status (antes da área de input).
 pub const STATUS_BAR_PREFIX: &str = " Start | .> ";
@@ -17,16 +17,16 @@ pub const DESKTOP_AREA_LEN: u16 = DESKTOP_COUNT as u16 * 4;
 pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &str) {
     match theme {
         1 => {
-            terminal::move_to(out, 0, 0);
+            ansi::move_to(out, 0, 0);
             write!(out, "└{:─^1$}┘", format!(" {} ", title), w as usize - 2).unwrap();
         }
         2 => {
-            terminal::move_to(out, 0, 0);
+            ansi::move_to(out, 0, 0);
             write!(out, "┌{:─^1$}┐", format!(" {} ", title), w as usize - 2).unwrap();
             for i in 1..(h - 1) {
-                terminal::move_to(out, 0, i);
+                ansi::move_to(out, 0, i);
                 write!(out, "│").unwrap();
-                terminal::move_to(out, w - 1, i);
+                ansi::move_to(out, w - 1, i);
                 write!(out, "│").unwrap();
             }
         }
@@ -38,7 +38,7 @@ pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &st
 pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_open: bool, current_desktop: usize) {
     let inner = (w - 2) as usize;
     let (cl, cr) = if panel_open { ('├', '┤') } else { ('┌', '┐') };
-    terminal::move_to(out, 0, h - 3);
+    ansi::move_to(out, 0, h - 3);
     if path.is_empty() {
         write!(out, "{}{:─<width$}{}", cl, "", cr, width = inner).unwrap();
     } else {
@@ -46,7 +46,7 @@ pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_o
         let fill = inner.saturating_sub(label.chars().count());
         write!(out, "{}{}{:─<width$}{}", cl, label, "", cr, width = fill).unwrap();
     }
-    terminal::move_to(out, 0, h - 2);
+    ansi::move_to(out, 0, h - 2);
     let prefix_len  = STATUS_BAR_PREFIX.chars().count();
     let desktop_len = DESKTOP_COUNT * 4; // "| N " × 4 = 16 colunas visuais
     let pad = inner.saturating_sub(prefix_len + desktop_len);
@@ -54,13 +54,13 @@ pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_o
     for d in 1..=DESKTOP_COUNT {
         write!(out, "|").unwrap();
         if d == current_desktop {
-            write!(out, "{} {} {}", terminal::REVERSE, d, terminal::RESET).unwrap();
+            write!(out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
         } else {
             write!(out, " {} ", d).unwrap();
         }
     }
     write!(out, "│").unwrap();
-    terminal::move_to(out, 0, h - 1);
+    ansi::move_to(out, 0, h - 1);
     write!(out, "└{:─<1$}┘", "", inner).unwrap();
 }
 
@@ -97,14 +97,14 @@ fn tab_content_char(title: &str, content_rows: usize, row: usize, scroll_offset:
 /// Desenha uma aba vertical de largura 2. O título rola quando maior que as linhas disponíveis.
 pub fn draw_tab(out: &mut impl Write, x: u16, y: u16, height: u16, title: &str, scroll_offset: usize) {
     let content_rows = height.saturating_sub(2) as usize;
-    terminal::move_to(out, x, y);
+    ansi::move_to(out, x, y);
     write!(out, "┌─").unwrap();
     for i in 0..content_rows {
         let ch = tab_content_char(title, content_rows, i, scroll_offset);
-        terminal::move_to(out, x, y + 1 + i as u16);
+        ansi::move_to(out, x, y + 1 + i as u16);
         write!(out, "│{}", ch).unwrap();
     }
-    terminal::move_to(out, x, y + height - 1);
+    ansi::move_to(out, x, y + height - 1);
     write!(out, "└─").unwrap();
 }
 
@@ -138,13 +138,88 @@ pub fn draw_scrollbar(
     let track_len = (bot - top + 1) as usize;
     let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, total, visible, scroll);
     for row in top..=bot {
-        terminal::move_to(out, x, row);
+        ansi::move_to(out, x, row);
         write!(out, "░").unwrap();
     }
     for i in 0..thumb_len {
-        terminal::move_to(out, x, top + thumb_pos as u16 + i as u16);
+        ansi::move_to(out, x, top + thumb_pos as u16 + i as u16);
         write!(out, "█").unwrap();
     }
+}
+
+/// Prefixo do prompt de entrada nas janelas de terminal.
+pub const TERMINAL_INPUT_PREFIX: &str = " .> ";
+
+/// Desenha o conteúdo de uma janela Terminal sobre o chrome já renderizado.
+///
+/// Layout interno (de cima para baixo):
+///   rows 1 .. h-4  : histórico de comandos (prioridade idêntica ao painel global)
+///   row  h-3        : ├─ path ─────────────────────────────────────────────────┤
+///   row  h-2        : │ .> input                                               │
+///   row  h-1        : └─────────────────────────────────────────────────────────┘  (chrome)
+///
+/// Requer `win.height >= 5`. Caso contrário é no-op.
+pub fn draw_terminal_content(
+    out:          &mut impl Write,
+    win:          &Window,
+    path:         &str,
+    commands:     &[CommandEntry],
+    panel_scroll: usize,
+) {
+    if win.height < 5 { return; }
+
+    let lx       = win.position_x;
+    let ty       = win.position_y;
+    let inner_w  = (win.width - 2) as usize;
+    let content_h = win.height.saturating_sub(4) as usize;
+
+    // ── Histórico de comandos ─────────────────────────────────────────────────
+    let rows = if commands.is_empty() {
+        vec![]
+    } else {
+        let blocks  = build_blocks(commands, inner_w);
+        let sr_len  = total_rows(&blocks);
+        let scroll  = panel_scroll.min(sr_len.saturating_sub(content_h));
+
+        if scroll == 0 {
+            build_priority_rows(&blocks, content_h).0
+        } else {
+            let clipped = clip_newest(&blocks, scroll);
+            let flat    = flatten(&clipped);
+            let start   = flat.len().saturating_sub(content_h);
+            let mut rows: Vec<String> = flat[start..].iter().map(|r| r.text.clone()).collect();
+            if let Some(first) = flat.get(start) {
+                if !rows.is_empty() { rows[0] = first.header.clone(); }
+            }
+            rows
+        }
+    };
+
+    for (i, row) in rows.iter().enumerate() {
+        ansi::move_to(out, lx + 1, ty + 1 + i as u16);
+        write!(out, "{:<width$}", row, width = inner_w).unwrap();
+    }
+    for i in rows.len()..content_h {
+        ansi::move_to(out, lx + 1, ty + 1 + i as u16);
+        write!(out, "{:<width$}", "", width = inner_w).unwrap();
+    }
+
+    // ── Separador de path ─────────────────────────────────────────────────────
+    let path_y = ty + win.height - 3;
+    ansi::move_to(out, lx, path_y);
+    if path.is_empty() {
+        write!(out, "├{:─<1$}┤", "", inner_w).unwrap();
+    } else {
+        let label = format!("── {} ", path);
+        let fill  = inner_w.saturating_sub(label.chars().count());
+        write!(out, "├{}{:─<fill$}┤", label, "", fill = fill).unwrap();
+    }
+
+    // ── Linha de input (prefixo; conteúdo real é renderizado pelo loop principal) ──
+    let input_y   = ty + win.height - 2;
+    let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
+    ansi::move_to(out, lx + 1, input_y);
+    write!(out, "{}{:<width$}", TERMINAL_INPUT_PREFIX, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
 }
 
 // ── Painel de comandos ────────────────────────────────────────────────────────
@@ -382,13 +457,13 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     let top_y      = h.saturating_sub(3 + panel_h as u16);
 
     // Borda superior
-    terminal::move_to(out, 0, top_y);
+    ansi::move_to(out, 0, top_y);
     write!(out, "┌{:─<1$}┐", "", dash_w).unwrap();
     let mut cur_y = top_y + 1;
 
     // Path (fixo)
     for row in &path_rows {
-        terminal::move_to(out, 0, cur_y);
+        ansi::move_to(out, 0, cur_y);
         write!(out, "│{:<width$} │", row, width = inner).unwrap();
         cur_y += 1;
     }
@@ -410,7 +485,7 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     };
 
     for row in &rows {
-        terminal::move_to(out, 0, cur_y);
+        ansi::move_to(out, 0, cur_y);
         write!(out, "│{:<width$} │", row, width = inner).unwrap();
         cur_y += 1;
     }
@@ -428,7 +503,7 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{CommandEntry, CommandStatus};
+    use crate::cmd::{CommandEntry, CommandStatus};
 
     fn timer_cmd(ticks: u32) -> CommandEntry {
         let mut cmd = CommandEntry::new(&format!("timer {}", ticks));

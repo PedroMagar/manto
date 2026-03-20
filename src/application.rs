@@ -1,12 +1,37 @@
 use std::mem;
 
+use crate::cmd::{CommandEntry, tick_all};
 use crate::window::Window;
 
+// ── Estado de janela terminal ─────────────────────────────────────────────────
+
+pub struct TerminalState {
+    pub commands:     Vec<CommandEntry>,
+    pub cmd_input:    String,
+    pub panel_scroll: usize,
+    pub path:         String,
+}
+
+impl TerminalState {
+    pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
+        Self { path, commands, cmd_input: String::new(), panel_scroll: 0 }
+    }
+
+    /// Avança um tick em todos os comandos. Retorna true se houve mudança.
+    pub fn tick(&mut self) -> bool {
+        tick_all(&mut self.commands)
+    }
+}
+
+// ── Application ───────────────────────────────────────────────────────────────
+
 pub struct Application {
-    pub title: String,
-    pub display: DisplayMode,
+    pub title:    String,
+    pub display:  DisplayMode,
     /// Janelas de menu fecham ao perder o foco.
-    pub is_menu: bool,
+    pub is_menu:  bool,
+    /// Presente em janelas de terminal; ausente em janelas comuns.
+    pub terminal: Option<TerminalState>,
 }
 
 pub enum DisplayMode {
@@ -17,11 +42,21 @@ pub enum DisplayMode {
 
 impl Application {
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: false }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: false, terminal: None }
     }
 
     pub fn menu(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: true }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: true, terminal: None }
+    }
+
+    /// Cria uma janela de terminal com histórico de comandos pré-carregado.
+    pub fn terminal_window(title: impl Into<String>, window: Window, path: String, commands: Vec<CommandEntry>) -> Self {
+        Self {
+            title:    title.into(),
+            display:  DisplayMode::Windowed(window),
+            is_menu:  false,
+            terminal: Some(TerminalState::new(path, commands)),
+        }
     }
 
     pub fn window(&self) -> Option<&Window> {
@@ -66,8 +101,6 @@ impl Application {
 
     /// Maximiza a janela para ocupar o espaço útil da tela,
     /// preservando a geometria original para restauração.
-    /// Deixa 1 coluna à esquerda (futura sidebar) e 3 à direita (abas + scrollbar),
-    /// 1 linha no topo e 3 no fundo (painel do desktop).
     pub fn maximize(&mut self, screen_w: u16, screen_h: u16) {
         let old = mem::replace(&mut self.display, DisplayMode::Minimized(Window::new(0, 0, 1, 1, 0)));
         self.display = match old {
