@@ -150,6 +150,41 @@ pub fn draw_scrollbar(
 /// Prefixo do prompt de entrada nas janelas de terminal.
 pub const TERMINAL_INPUT_PREFIX: &str = " .> ";
 
+fn slice_line(line: &str, scroll_x: usize, width: usize) -> String {
+    line.chars().skip(scroll_x).take(width).collect()
+}
+
+fn command_output_line(entry: &CommandEntry, index: usize, line: &str) -> String {
+    let last_idx = entry.output_lines.len().saturating_sub(1);
+    let branch = if index == last_idx { "└─ " } else { "├─ " };
+    let suffix = if index == last_idx && !matches!(entry.status, CommandStatus::Complete) {
+        " (running)"
+    } else {
+        ""
+    };
+    format!("  │ {}{}{}", branch, line, suffix)
+}
+
+pub fn terminal_content_width(path: &str, commands: &[CommandEntry]) -> usize {
+    let mut max_width = path.chars().count() + 3;
+    let mut last_cwd: Option<&str> = None;
+
+    for entry in commands {
+        if !entry.cwd.is_empty() && last_cwd != Some(entry.cwd.as_str()) {
+            max_width = max_width.max(entry.cwd.chars().count());
+        }
+        max_width = max_width.max(format!("  ├─┬ {}", entry.command).chars().count());
+        for (index, line) in entry.output_lines.iter().enumerate() {
+            max_width = max_width.max(command_output_line(entry, index, line).chars().count());
+        }
+        if !entry.cwd.is_empty() {
+            last_cwd = Some(entry.cwd.as_str());
+        }
+    }
+
+    max_width
+}
+
 /// Desenha o conteúdo de uma janela Terminal sobre o chrome já renderizado.
 ///
 /// Layout interno (de cima para baixo):
@@ -171,13 +206,17 @@ pub fn draw_terminal_content(
     let lx       = win.position_x;
     let ty       = win.position_y;
     let inner_w  = (win.width - 2) as usize;
-    let content_h = win.height.saturating_sub(4) as usize;
+    let content_w = terminal_content_width(path, commands).max(inner_w);
+    let has_hscroll = content_w > inner_w;
+    let content_h = win.height.saturating_sub(if has_hscroll { 5 } else { 4 }) as usize;
+    let max_scroll = content_w.saturating_sub(inner_w);
+    let scroll_x = (win.scroll_x as usize).min(max_scroll);
 
     // ── Histórico de comandos ─────────────────────────────────────────────────
     let rows = if commands.is_empty() {
         vec![]
     } else {
-        let blocks  = build_blocks(commands, inner_w);
+        let blocks  = build_blocks(commands, content_w);
         let sr_len  = total_rows(&blocks);
         let scroll  = panel_scroll.min(sr_len.saturating_sub(content_h));
 
@@ -197,7 +236,8 @@ pub fn draw_terminal_content(
 
     for (i, row) in rows.iter().enumerate() {
         ansi::move_to(out, lx + 1, ty + 1 + i as u16);
-        write!(out, "{:<width$}", row, width = inner_w).unwrap();
+        let display = slice_line(row, scroll_x, inner_w);
+        write!(out, "{:<width$}", display, width = inner_w).unwrap();
     }
     for i in rows.len()..content_h {
         ansi::move_to(out, lx + 1, ty + 1 + i as u16);
@@ -205,18 +245,19 @@ pub fn draw_terminal_content(
     }
 
     // ── Separador de path ─────────────────────────────────────────────────────
-    let path_y = ty + win.height - 3;
+    let path_y = ty + win.height - if has_hscroll { 4 } else { 3 };
     ansi::move_to(out, lx, path_y);
     if path.is_empty() {
         write!(out, "├{:─<1$}┤", "", inner_w).unwrap();
     } else {
         let label = format!("── {} ", path);
-        let fill  = inner_w.saturating_sub(label.chars().count());
-        write!(out, "├{}{:─<fill$}┤", label, "", fill = fill).unwrap();
+        let display = slice_line(&label, scroll_x, inner_w);
+        let fill  = inner_w.saturating_sub(display.chars().count());
+        write!(out, "├{}{:─<fill$}┤", display, "", fill = fill).unwrap();
     }
 
     // ── Linha de input (prefixo; conteúdo real é renderizado pelo loop principal) ──
-    let input_y   = ty + win.height - 2;
+    let input_y   = ty + win.height - if has_hscroll { 3 } else { 2 };
     let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
     ansi::move_to(out, lx + 1, input_y);
     write!(out, "{}{:<width$}", TERMINAL_INPUT_PREFIX, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
@@ -242,6 +283,9 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 
 /// Um comando com todas as suas linhas pré-quebradas para caber em `width`.
 ///
+/// `header` pode começar com uma linha de diretório quando o comando inicia
+/// em um cwd diferente do bloco anterior.
+///
 /// `outputs` está ordenado do mais antigo (índice 0) ao mais recente (último).
 /// `outputs.last()` = resultado final — segunda maior prioridade de exibição.
 /// `elision` = indicador `│ ├─ ...` usado quando outputs intermediários são ocultos.
@@ -262,8 +306,16 @@ fn total_rows(blocks: &[CommandBlock]) -> usize {
 
 /// Constrói um `CommandBlock` por comando, pré-quebrando as linhas em `width`.
 fn build_blocks(commands: &[CommandEntry], width: usize) -> Vec<CommandBlock> {
-    commands.iter().map(|entry| {
-        let header  = wrap_line(&format!("  ├─┬ {}", entry.command), width);
+    let mut blocks = Vec::with_capacity(commands.len());
+    let mut last_cwd: Option<&str> = None;
+
+    for entry in commands {
+        let mut header = Vec::new();
+        if !entry.cwd.is_empty() && last_cwd != Some(entry.cwd.as_str()) {
+            header.extend(wrap_line(&entry.cwd, width));
+        }
+        header.extend(wrap_line(&format!("  ├─┬ {}", entry.command), width));
+
         let elision = wrap_line("  │ ├─ ...", width);
         let last_idx = entry.output_lines.len().saturating_sub(1);
         let outputs = entry.output_lines.iter().enumerate().map(|(i, line)| {
@@ -275,8 +327,16 @@ fn build_blocks(commands: &[CommandEntry], width: usize) -> Vec<CommandBlock> {
             };
             wrap_line(&format!("  │ {}{}{}", branch, line, suffix), width)
         }).collect();
-        CommandBlock { header, elision, outputs }
-    }).collect()
+
+        blocks.push(CommandBlock { header, elision, outputs });
+        last_cwd = if entry.cwd.is_empty() {
+            last_cwd
+        } else {
+            Some(entry.cwd.as_str())
+        };
+    }
+
+    blocks
 }
 
 /// Remove `skip` linhas mais recentes da lista de blocos.
@@ -442,8 +502,9 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     let max_h  = (h as usize * 3 / 4).min(h.saturating_sub(8) as usize);
     if max_h < 3 { return; }
 
-    let path_rows = wrap_line(path, inner);
-    let blocks    = build_blocks(commands, inner);
+    let content_w = terminal_content_width(path, commands).max(inner);
+    let path_rows = vec![path.to_string()];
+    let blocks    = build_blocks(commands, content_w);
     let sr_len    = total_rows(&blocks);
     if path_rows.is_empty() || sr_len == 0 { return; }
 
@@ -464,7 +525,8 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     // Path (fixo)
     for row in &path_rows {
         ansi::move_to(out, 0, cur_y);
-        write!(out, "│{:<width$} │", row, width = inner).unwrap();
+        let display = slice_line(row, 0, inner);
+        write!(out, "│{:<width$} │", display, width = inner).unwrap();
         cur_y += 1;
     }
 
@@ -486,7 +548,8 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
 
     for row in &rows {
         ansi::move_to(out, 0, cur_y);
-        write!(out, "│{:<width$} │", row, width = inner).unwrap();
+        let display = slice_line(row, 0, inner);
+        write!(out, "│{:<width$} │", display, width = inner).unwrap();
         cur_y += 1;
     }
     let _ = cur_y;
@@ -505,34 +568,26 @@ mod tests {
     use super::*;
     use crate::cmd::{CommandEntry, CommandStatus};
 
-    fn timer_cmd(ticks: u32) -> CommandEntry {
-        let mut cmd = CommandEntry::new(&format!("timer {}", ticks));
-        // Simula os ticks: output_lines já criado com "Ns", adiciona os demais.
-        for i in (1..ticks).rev() {
-            cmd.output_lines.push(format!("{}s", i));
+    fn running_cmd(name: &str, ticks: u32) -> CommandEntry {
+        let mut outputs = Vec::new();
+        for i in (1..=ticks).rev() {
+            outputs.push(format!("{}s", i));
         }
-        // Após todos os ticks normais, o último seria "complete" mas para testes
-        // de running deixamos status como Running.
-        cmd.status = CommandStatus::Running;
-        cmd
+        let refs: Vec<&str> = outputs.iter().map(String::as_str).collect();
+        CommandEntry::fixture(name, &refs, CommandStatus::Running)
     }
 
     fn simple_cmd(name: &str, output: &str) -> CommandEntry {
-        let mut cmd = CommandEntry::new(name);
-        // Substitui "command not found" pelo output desejado.
-        cmd.output_lines = vec![output.to_string()];
-        cmd.status = CommandStatus::Complete;
-        cmd
+        CommandEntry::fixture(name, &[output], CommandStatus::Complete)
     }
 
     #[test]
     fn soberano_header_antes_de_ocultar_outputs() {
-        // timer 12: header + outputs [12s, 11s, 10s, 9s (running)], area_h=3
-        let cmd = timer_cmd(4); // 4 ticks → output_lines = ["4s","3s","2s","1s"]
+        let cmd = running_cmd("count 4", 4);
         let blocks = build_blocks(&[cmd], 40);
         let (rows, hidden) = build_priority_rows(&blocks, 3);
         assert!(hidden);
-        assert_eq!(rows[0], "  ├─┬ timer 4");
+        assert_eq!(rows[0], "  ├─┬ count 4");
         // Resultado (última linha) sempre visível.
         assert_eq!(rows.last().unwrap(), "  │ └─ 1s (running)");
     }
@@ -549,17 +604,17 @@ mod tests {
 
     #[test]
     fn cabecalho_antigo_aparece_quando_ha_espaco() {
-        // echo ok (2 linhas) + timer 3 (4 linhas) = 6 linhas no total.
-        // Com area_h=5, timer 3 consome 4 linhas (prioridade), echo ok só cabe
+        // echo ok (2 linhas) + count 3 (4 linhas) = 6 linhas no total.
+        // Com area_h=5, count 3 consome 4 linhas (prioridade), echo ok só cabe
         // o cabeçalho (1 linha restante). Nenhum conteúdo é tecnicamente "oculto"
         // pois ambos os blocos estão representados.
         let older  = simple_cmd("echo ok", "ok");
-        let latest = timer_cmd(3); // header + [3s,2s,1s]
+        let latest = running_cmd("count 3", 3);
         let blocks = build_blocks(&[older, latest], 40);
         let (rows, hidden) = build_priority_rows(&blocks, 5);
         assert!(!hidden);
         assert_eq!(rows[0], "  ├─┬ echo ok");   // cabeçalho do antigo
-        assert_eq!(rows[1], "  ├─┬ timer 3");   // cabeçalho do recente
+        assert_eq!(rows[1], "  ├─┬ count 3");   // cabeçalho do recente
         assert_eq!(rows[2], "  │ ├─ 3s");
         assert_eq!(rows[3], "  │ ├─ 2s");
         assert_eq!(rows[4], "  │ └─ 1s (running)");
@@ -567,24 +622,24 @@ mod tests {
 
     #[test]
     fn elision_entre_intermediarios_ocultos_e_resultado() {
-        let cmd = timer_cmd(5); // outputs: [5s,4s,3s,2s,1s]
+        let cmd = running_cmd("count 5", 5);
         let blocks = build_blocks(&[cmd], 40);
         let (rows, hidden) = build_priority_rows(&blocks, 4);
         assert!(hidden);
-        assert_eq!(rows[0], "  ├─┬ timer 5");
+        assert_eq!(rows[0], "  ├─┬ count 5");
         assert_eq!(rows[1], "  │ ├─ ...");
         assert_eq!(rows[3], "  │ └─ 1s (running)");
     }
 
     #[test]
     fn clip_mantem_resultado_e_oculta_intermediarios_antigos() {
-        let cmd   = timer_cmd(5); // outputs: [5s,4s,3s,2s,1s]
+        let cmd   = running_cmd("count 5", 5);
         let block = build_blocks(&[cmd], 40).remove(0);
         // Mantém 4 linhas: header + ??? + resultado
         let clipped = clip_block(&block, 4).unwrap();
         let (rows, hidden) = build_priority_rows(&[clipped], 4);
         assert!(!hidden, "clipped já está dentro do orçamento");
-        assert_eq!(rows[0], "  ├─┬ timer 5");
+        assert_eq!(rows[0], "  ├─┬ count 5");
         assert!(rows.iter().any(|r| r == "  │ ├─ ..."));
         assert_eq!(rows.last().unwrap(), "  │ └─ 1s (running)");
     }
@@ -592,22 +647,22 @@ mod tests {
     #[test]
     fn clip_newest_remove_mais_recentes_primeiro() {
         let older = simple_cmd("echo ok", "ok");
-        let newer = timer_cmd(3); // header + [3s,2s,1s] = 4 linhas
+        let newer = running_cmd("count 3", 3);
         let blocks = build_blocks(&[older, newer], 40);
         // Remove 2 linhas mais recentes do `newer`.
         let clipped = clip_newest(&blocks, 2);
         let (rows, _) = build_priority_rows(&clipped, 6);
         assert_eq!(rows[0], "  ├─┬ echo ok");
         assert_eq!(rows[1], "  │ └─ ok");
-        assert_eq!(rows[2], "  ├─┬ timer 3");
+        assert_eq!(rows[2], "  ├─┬ count 3");
         // O resultado de newer ("1s running") ainda está presente após clip de 2 intermediários.
         assert_eq!(rows[3], "  │ └─ 1s (running)");
     }
 
     #[test]
     fn scroll_revela_comando_mais_antigo() {
-        let older = CommandEntry::new("test"); // header + "command not found"
-        let newer = timer_cmd(4); // header + [4s,3s,2s,1s] = 5 linhas
+        let older = CommandEntry::fixture("test", &["command not found"], CommandStatus::Complete);
+        let newer = running_cmd("count 4", 4);
         let blocks = build_blocks(&[older, newer], 40);
 
         // scroll=2: remove 2 linhas mais recentes do newer
@@ -619,7 +674,7 @@ mod tests {
             if !rows.is_empty() { rows[0] = first.header.clone(); }
         }
         assert_eq!(rows[0], "  ├─┬ test");
-        assert_eq!(rows[1], "  ├─┬ timer 4");
+        assert_eq!(rows[1], "  ├─┬ count 4");
 
         // scroll=3: remove 3 linhas → older fica totalmente visível
         let clipped2 = clip_newest(&blocks, 3);

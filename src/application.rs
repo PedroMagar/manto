@@ -8,13 +8,24 @@ use crate::window::Window;
 pub struct TerminalState {
     pub commands:     Vec<CommandEntry>,
     pub cmd_input:    String,
+    pub input_cursor: usize,
     pub panel_scroll: usize,
     pub path:         String,
+    pub history_index: Option<usize>,
+    pub history_draft: Option<String>,
 }
 
 impl TerminalState {
     pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
-        Self { path, commands, cmd_input: String::new(), panel_scroll: 0 }
+        Self {
+            path,
+            commands,
+            cmd_input: String::new(),
+            input_cursor: 0,
+            panel_scroll: 0,
+            history_index: None,
+            history_draft: None,
+        }
     }
 
     /// Avança um tick em todos os comandos. Retorna true se houve mudança.

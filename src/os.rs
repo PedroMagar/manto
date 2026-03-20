@@ -58,6 +58,7 @@ pub enum Key {
     Down,
     Left,
     Right,
+    Tab,
     Enter,
     Backspace,
     Delete,
@@ -176,6 +177,7 @@ mod platform {
                 26       => return Key::CtrlZ,
                 20       => return Key::CtrlT,
                 8 | 127  => return Key::Backspace,
+                9        => return Key::Tab,
                 13       => return Key::Enter,
                 27 => {
                     if poll(10) {
@@ -424,6 +426,7 @@ mod platform {
 
                 match vk {
                     0x08 => return Key::Backspace,
+                    0x09 => return Key::Tab,
                     0x2E => return Key::Delete,
                     0x1B => return Key::Escape,
                     0x21 => return Key::PageUp,
