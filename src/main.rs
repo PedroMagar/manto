@@ -38,9 +38,9 @@ enum SnapRegion {
 }
 
 /// Retorna o índice da janela visualmente no topo na posição (x, y).
-fn topmost_window_at(applications: &[Application], x: u16, y: u16) -> Option<usize> {
+fn topmost_window_at(applications: &[Application], current_desktop: usize, x: u16, y: u16) -> Option<usize> {
     applications.iter().rposition(|app| {
-        app.window().map_or(false, |win| {
+        app.on_desktop(current_desktop) && app.window().map_or(false, |win| {
             x >= win.position_x
                 && x < win.position_x + win.width
                 && y >= win.position_y
@@ -50,10 +50,10 @@ fn topmost_window_at(applications: &[Application], x: u16, y: u16) -> Option<usi
 }
 
 /// Calcula (app_idx, tab_y, tab_height) para cada app minimizado visível.
-fn tab_layout(applications: &[Application], screen_h: u16, scroll: usize) -> Vec<(usize, u16, u16)> {
+fn tab_layout(applications: &[Application], current_desktop: usize, screen_h: u16, scroll: usize) -> Vec<(usize, u16, u16)> {
     let usable_h = screen_h.saturating_sub(4);
     let minimized: Vec<usize> = applications.iter().enumerate()
-        .filter(|(_, a)| a.is_minimized())
+        .filter(|(_, a)| a.on_desktop(current_desktop) && a.is_minimized())
         .map(|(i, _)| i)
         .collect();
 
@@ -73,32 +73,33 @@ fn tab_layout(applications: &[Application], screen_h: u16, scroll: usize) -> Vec
 
 
 /// Scroll máximo possível para as abas.
-fn max_tab_scroll(applications: &[Application], screen_h: u16) -> usize {
+fn max_tab_scroll(applications: &[Application], current_desktop: usize, screen_h: u16) -> usize {
     let usable_h = screen_h.saturating_sub(4);
-    let total = applications.iter().filter(|a| a.is_minimized()).count();
+    let total = applications.iter().filter(|a| a.on_desktop(current_desktop) && a.is_minimized()).count();
     if total == 0 || usable_h == 0 { return 0; }
     let tab_h: u16 = if (total as u16) * 8 <= usable_h { 8 } else { 6 };
     let max_visible = (usable_h / tab_h) as usize;
     total.saturating_sub(max_visible)
 }
 
-fn active_window_idx(applications: &[Application], mode: &Mode) -> Option<usize> {
+fn active_window_idx(applications: &[Application], mode: &Mode, current_desktop: usize) -> Option<usize> {
     match mode {
         Mode::Moving { app_idx, .. }
         | Mode::Resizing { app_idx }
         | Mode::TerminalFocus { app_idx } => applications
             .get(*app_idx)
+            .filter(|app| app.on_desktop(current_desktop))
             .and_then(|app| app.window())
             .map(|_| *app_idx),
         Mode::Normal => applications.iter().enumerate()
-            .rfind(|(_, app)| app.window().is_some())
+            .rfind(|(_, app)| app.on_desktop(current_desktop) && app.window().is_some())
             .map(|(idx, _)| idx),
         Mode::Typing => None,
     }
 }
 
-fn close_active_window(applications: &mut Vec<Application>, mode: &mut Mode, screen_h: u16, tab_scroll: &mut usize) -> bool {
-    let Some(idx) = active_window_idx(applications, mode) else {
+fn close_active_window(applications: &mut Vec<Application>, mode: &mut Mode, current_desktop: usize, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
         return false;
     };
 
@@ -111,7 +112,7 @@ fn close_active_window(applications: &mut Vec<Application>, mode: &mut Mode, scr
     }
 
     applications.remove(idx);
-    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));
     *mode = Mode::Normal;
     true
 }
@@ -129,6 +130,7 @@ fn bring_window_to_front(applications: &mut Vec<Application>, idx: usize) -> usi
 fn spawn_terminal_window(
     applications: &mut Vec<Application>,
     next_terminal_id: &mut usize,
+    current_desktop: usize,
     screen_w: u16,
     screen_h: u16,
     path: &str,
@@ -143,12 +145,12 @@ fn spawn_terminal_window(
     let tx = (screen_w.saturating_sub(tw)) / 2;
     let ty = 1 + usable_h.saturating_sub(th) / 2;
     let win = Window::new(tx, ty, tw, th, 0);
-    applications.push(Application::terminal_window(title, win, path.to_string(), commands));
+    applications.push(Application::terminal_window(title, win, path.to_string(), commands).with_desktop(current_desktop));
     applications.len() - 1
 }
 
-fn toggle_start_menu(applications: &mut Vec<Application>, screen_h: u16, tab_scroll: &mut usize) -> bool {
-    if let Some(idx) = applications.iter().position(|a| a.is_menu) {
+fn toggle_start_menu(applications: &mut Vec<Application>, current_desktop: usize, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    if let Some(idx) = applications.iter().position(|a| a.on_desktop(current_desktop) && a.is_menu) {
         applications.remove(idx);
     } else {
         let usable_h = screen_h.saturating_sub(4);
@@ -157,14 +159,14 @@ fn toggle_start_menu(applications: &mut Vec<Application>, screen_h: u16, tab_scr
         applications.push(Application::menu(
             "Start",
             Window::new(2, pos_y, 20, win_h, 0).without_chrome(),
-        ));
+        ).with_desktop(current_desktop));
     }
-    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));
     true
 }
 
-fn toggle_active_maximize(applications: &mut [Application], mode: &Mode, screen_w: u16, screen_h: u16) -> bool {
-    let Some(idx) = active_window_idx(applications, mode) else {
+fn toggle_active_maximize(applications: &mut [Application], mode: &Mode, current_desktop: usize, screen_w: u16, screen_h: u16) -> bool {
+    let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
         return false;
     };
 
@@ -176,8 +178,8 @@ fn toggle_active_maximize(applications: &mut [Application], mode: &Mode, screen_
     true
 }
 
-fn minimize_active_window(applications: &mut Vec<Application>, mode: &mut Mode, screen_h: u16, tab_scroll: &mut usize) -> bool {
-    let Some(idx) = active_window_idx(applications, mode) else {
+fn minimize_active_window(applications: &mut Vec<Application>, mode: &mut Mode, current_desktop: usize, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
         return false;
     };
 
@@ -192,21 +194,21 @@ fn minimize_active_window(applications: &mut Vec<Application>, mode: &mut Mode, 
         applications[idx].restore_maximize();
     }
     applications[idx].minimize();
-    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));
     *mode = Mode::Normal;
     true
 }
 
-fn focus_relative_window(applications: &mut Vec<Application>, mode: &mut Mode, backward: bool) -> bool {
+fn focus_relative_window(applications: &mut Vec<Application>, mode: &mut Mode, current_desktop: usize, backward: bool) -> bool {
     let visible: Vec<usize> = applications.iter().enumerate()
-        .filter(|(_, app)| app.window().is_some())
+        .filter(|(_, app)| app.on_desktop(current_desktop) && app.window().is_some())
         .map(|(idx, _)| idx)
         .collect();
     if visible.len() <= 1 {
         return false;
     }
 
-    let active = active_window_idx(applications, mode).unwrap_or(*visible.last().unwrap());
+    let active = active_window_idx(applications, mode, current_desktop).unwrap_or(*visible.last().unwrap());
     let current_pos = visible.iter().position(|&idx| idx == active).unwrap_or(visible.len() - 1);
     let target_pos = if backward {
         current_pos.checked_sub(1).unwrap_or(visible.len() - 1)
@@ -216,6 +218,36 @@ fn focus_relative_window(applications: &mut Vec<Application>, mode: &mut Mode, b
 
     bring_window_to_front(applications, visible[target_pos]);
     *mode = Mode::Normal;
+    true
+}
+
+fn move_active_window_to_desktop(
+    applications: &mut Vec<Application>,
+    mode: &mut Mode,
+    current_desktop: &mut usize,
+    target_desktop: usize,
+    screen_h: u16,
+    tab_scroll: &mut usize,
+) -> bool {
+    if target_desktop == *current_desktop {
+        return false;
+    }
+
+    let Some(idx) = active_window_idx(applications, mode, *current_desktop) else {
+        return false;
+    };
+
+    if applications[idx].is_menu {
+        return false;
+    }
+
+    applications[idx].desktop = target_desktop;
+    bring_window_to_front(applications, idx);
+    *current_desktop = target_desktop;
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, *current_desktop, screen_h));
+    if !mode_targets_desktop(mode, applications, *current_desktop) {
+        *mode = Mode::Normal;
+    }
     true
 }
 
@@ -254,11 +286,12 @@ fn snap_rect(screen_w: u16, screen_h: u16, region: SnapRegion) -> (u16, u16, u16
 fn snap_active_window(
     applications: &mut [Application],
     mode: &mut Mode,
+    current_desktop: usize,
     screen_w: u16,
     screen_h: u16,
     region: SnapRegion,
 ) -> bool {
-    let Some(idx) = active_window_idx(applications, mode) else {
+    let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
         return false;
     };
 
@@ -273,6 +306,32 @@ fn snap_active_window(
     applications[idx].set_window_geometry(x, y, w.max(MIN_W), h.max(MIN_H));
     *mode = Mode::Normal;
     true
+}
+
+fn mode_targets_desktop(mode: &Mode, applications: &[Application], current_desktop: usize) -> bool {
+    match mode {
+        Mode::Moving { app_idx, .. }
+        | Mode::Resizing { app_idx }
+        | Mode::TerminalFocus { app_idx } => applications
+            .get(*app_idx)
+            .map_or(false, |app| app.on_desktop(current_desktop)),
+        Mode::Normal | Mode::Typing => true,
+    }
+}
+
+fn place_pointer_on_terminal_input(pointer: &mut Pointer, applications: &[Application], app_idx: usize, screen_w: u16, screen_h: u16) {
+    let Some(win) = applications.get(app_idx).and_then(|app| app.window()) else {
+        return;
+    };
+
+    let prefix_len = TERMINAL_INPUT_PREFIX.chars().count() as u16;
+    let input_x = win.position_x + 1 + prefix_len;
+    let input_y = win.position_y + win.height.saturating_sub(2);
+    let max_x = win.position_x + win.width.saturating_sub(2);
+
+    pointer.x = input_x.min(max_x);
+    pointer.y = input_y;
+    pointer.clamp_to_bounds(screen_w, screen_h);
 }
 
 fn render(
@@ -300,21 +359,23 @@ fn render(
 
     // 2. Janelas em ordem de empilhamento: chrome e conteúdo na mesma passada.
     for app in applications {
-        if let Some(win) = app.window() {
+        if app.on_desktop(current_desktop) {
+            if let Some(win) = app.window() {
             win.draw(out, &app.title);
             if let Some(term) = app.terminal.as_ref() {
                 draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
             }
         }
+        }
     }
 
     // 3. Abas e scrollbar lateral
-    let minimized_count = applications.iter().filter(|a| a.is_minimized()).count();
+    let minimized_count = applications.iter().filter(|a| a.on_desktop(current_desktop) && a.is_minimized()).count();
     let tab_x = w.saturating_sub(3);
     let sb_x  = w.saturating_sub(1);
     let sb_top = 1u16;
     let sb_bot = h.saturating_sub(4);
-    let tabs = tab_layout(applications, h, tab_scroll);
+    let tabs = tab_layout(applications, current_desktop, h, tab_scroll);
     if minimized_count > 0 {
         for &(app_idx, tab_y, tab_h) in &tabs {
             let is_hovered = pointer.x >= tab_x
@@ -328,8 +389,10 @@ fn render(
 
     // 4. Preview de redimensionamento
     if let Some((idx, pw, ph)) = resize_preview {
-        if let Some(win) = applications[idx].window() {
+        if applications[idx].on_desktop(current_desktop) {
+            if let Some(win) = applications[idx].window() {
             win.draw_preview(out, pw, ph);
+        }
         }
     }
 
@@ -364,7 +427,10 @@ fn render(
         ansi::show_cursor(out);
     } else if let Some((term_idx, term_input)) = focused_terminal {
         // Cursor real dentro da janela de terminal com foco
-        if let Some(win) = applications.get(term_idx).and_then(|a| a.window()) {
+        if let Some(win) = applications.get(term_idx)
+            .filter(|a| a.on_desktop(current_desktop))
+            .and_then(|a| a.window())
+        {
             if win.height >= 5 {
                 let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
                 let inner_w    = (win.width - 2) as usize;
@@ -415,7 +481,7 @@ fn render(
                 return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
             }
 
-            if let Some(top_idx) = topmost_window_at(applications, px, py) {
+            if let Some(top_idx) = topmost_window_at(applications, current_desktop, px, py) {
                 if let Some(win) = applications[top_idx].window() {
                     if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
                         return Some(ch);
@@ -480,24 +546,44 @@ fn main() {
             let mut mode_changed = false;
 
             match key {
+                Key::Ctrl1 => {
+                    if move_active_window_to_desktop(&mut applications, &mut mode, &mut current_desktop, 1, last_size.1, &mut tab_scroll) {
+                        mode_changed = true;
+                    }
+                }
+                Key::Ctrl2 => {
+                    if move_active_window_to_desktop(&mut applications, &mut mode, &mut current_desktop, 2, last_size.1, &mut tab_scroll) {
+                        mode_changed = true;
+                    }
+                }
+                Key::Ctrl3 => {
+                    if move_active_window_to_desktop(&mut applications, &mut mode, &mut current_desktop, 3, last_size.1, &mut tab_scroll) {
+                        mode_changed = true;
+                    }
+                }
+                Key::Ctrl4 => {
+                    if move_active_window_to_desktop(&mut applications, &mut mode, &mut current_desktop, 4, last_size.1, &mut tab_scroll) {
+                        mode_changed = true;
+                    }
+                }
                 Key::CtrlDelete => break,
                 Key::CtrlF => {
-                    if toggle_active_maximize(&mut applications, &mode, last_size.0, last_size.1) {
+                    if toggle_active_maximize(&mut applications, &mode, current_desktop, last_size.0, last_size.1) {
                         mode_changed = true;
                     }
                 }
                 Key::CtrlN => {
-                    if focus_relative_window(&mut applications, &mut mode, false) {
+                    if focus_relative_window(&mut applications, &mut mode, current_desktop, false) {
                         mode_changed = true;
                     }
                 }
                 Key::CtrlP => {
-                    if focus_relative_window(&mut applications, &mut mode, true) {
+                    if focus_relative_window(&mut applications, &mut mode, current_desktop, true) {
                         mode_changed = true;
                     }
                 }
                 Key::CtrlW => {
-                    if close_active_window(&mut applications, &mut mode, last_size.1, &mut tab_scroll) {
+                    if close_active_window(&mut applications, &mut mode, current_desktop, last_size.1, &mut tab_scroll) {
                         mode_changed = true;
                     }
                 }
@@ -507,11 +593,13 @@ fn main() {
                     let app_idx = spawn_terminal_window(
                         &mut applications,
                         &mut next_terminal_id,
+                        current_desktop,
                         last_size.0,
                         last_size.1,
                         &current_path,
                         Vec::new(),
                     );
+                    place_pointer_on_terminal_input(&mut pointer, &applications, app_idx, last_size.0, last_size.1);
                     mode = Mode::TerminalFocus { app_idx };
                     mode_changed = true;
                 }
@@ -519,56 +607,60 @@ fn main() {
                 _ => match &mut mode {
                     Mode::Normal => match key {
                         Key::CtrlQ => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::TopLeft) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::TopLeft) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlE => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::TopRight) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::TopRight) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlZ => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::BottomLeft) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::BottomLeft) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlV => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::BottomRight) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::BottomRight) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlH | Key::Backspace => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Left) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Left) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlL => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Right) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Right) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlK => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Top) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Top) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlJ => {
-                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Bottom) {
+                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Bottom) {
                                 mode_changed = true;
                             }
                         }
                         Key::Char(digit @ '1'..='4') => {
                             current_desktop = digit.to_digit(10).unwrap_or(1) as usize;
+                            tab_scroll = tab_scroll.min(max_tab_scroll(&applications, current_desktop, last_size.1));
+                            if !mode_targets_desktop(&mode, &applications, current_desktop) {
+                                mode = Mode::Normal;
+                            }
                             mode_changed = true;
                         }
                         Key::CtrlD => {
-                            if toggle_start_menu(&mut applications, last_size.1, &mut tab_scroll) {
+                            if toggle_start_menu(&mut applications, current_desktop, last_size.1, &mut tab_scroll) {
                                 mode_changed = true;
                             }
                         }
                         Key::CtrlX => {
-                            if minimize_active_window(&mut applications, &mut mode, last_size.1, &mut tab_scroll) {
+                            if minimize_active_window(&mut applications, &mut mode, current_desktop, last_size.1, &mut tab_scroll) {
                                 mode_changed = true;
                             }
                         }
@@ -591,6 +683,10 @@ fn main() {
                             // Botões de desktop (prioridade sobre área de comando)
                             if let Some(d) = desktop_at(pointer.x, pointer.y, last_size.0, last_size.1) {
                                 current_desktop = d;
+                                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, current_desktop, last_size.1));
+                                if !mode_targets_desktop(&mode, &applications, current_desktop) {
+                                    mode = Mode::Normal;
+                                }
                                 mode_changed = true;
                             // Área de comando na barra de status
                             } else if pointer.y == last_size.1 - 2 && pointer.x >= CMD_INPUT_X {
@@ -604,7 +700,7 @@ fn main() {
                                 && pointer.x >= STATUS_START_X
                                 && pointer.x < start_end
                             {
-                                toggle_start_menu(&mut applications, last_size.1, &mut tab_scroll);
+                                toggle_start_menu(&mut applications, current_desktop, last_size.1, &mut tab_scroll);
                                 mode_changed = true;
                             // Scrollbar (coluna mais à direita): metade superior sobe, inferior desce
                             } else if pointer.x == sb_x {
@@ -614,13 +710,13 @@ fn main() {
                                     tab_scroll = tab_scroll.saturating_sub(1);
                                 } else {
                                     tab_scroll = (tab_scroll + 1)
-                                        .min(max_tab_scroll(&applications, last_size.1));
+                                        .min(max_tab_scroll(&applications, current_desktop, last_size.1));
                                 }
                                 mode_changed = true;
                             // Aba → restaura app minimizado
                             } else if pointer.x >= tab_x {
                                 last_space_time = None;
-                                let on_tab = tab_layout(&applications, last_size.1, tab_scroll)
+                                let on_tab = tab_layout(&applications, current_desktop, last_size.1, tab_scroll)
                                     .into_iter()
                                     .find(|&(_, ty, th)| pointer.y >= ty && pointer.y < ty + th)
                                     .map(|(idx, _, _)| idx);
@@ -628,20 +724,20 @@ fn main() {
                                 if let Some(app_idx) = on_tab {
                                     applications[app_idx].restore();
                                     tab_scroll = tab_scroll
-                                        .min(max_tab_scroll(&applications, last_size.1));
+                                        .min(max_tab_scroll(&applications, current_desktop, last_size.1));
                                     mode_changed = true;
                                 }
                             // Janela
                             } else if let Some(top_idx) =
-                                topmost_window_at(&applications, pointer.x, pointer.y)
+                                topmost_window_at(&applications, current_desktop, pointer.x, pointer.y)
                             {
                                 // Fecha menu se a ação foi fora dele
                                 let mut skip = false;
-                                if let Some(menu_idx) = applications.iter().position(|a| a.is_menu) {
+                                if let Some(menu_idx) = applications.iter().position(|a| a.on_desktop(current_desktop) && a.is_menu) {
                                     if top_idx != menu_idx {
                                         applications.remove(menu_idx);
                                         tab_scroll = tab_scroll
-                                            .min(max_tab_scroll(&applications, last_size.1));
+                                            .min(max_tab_scroll(&applications, current_desktop, last_size.1));
                                         mode_changed = true;
                                         skip = true; // top_idx inválido após remove
                                     }
@@ -674,6 +770,7 @@ fn main() {
                                             let app = applications.remove(top_idx);
                                             applications.push(app);
                                         }
+                                        place_pointer_on_terminal_input(&mut pointer, &applications, applications.len() - 1, last_size.0, last_size.1);
                                         mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
                                         mode_changed = true;
                                     }
@@ -706,7 +803,7 @@ fn main() {
                                     } else if is_close && win_closable {
                                         applications.remove(top_idx);
                                         tab_scroll = tab_scroll
-                                            .min(max_tab_scroll(&applications, last_size.1));
+                                            .min(max_tab_scroll(&applications, current_desktop, last_size.1));
                                         mode_changed = true;
                                     } else if is_resize && !maximized && win_resizable {
                                         mode = Mode::Resizing { app_idx: top_idx };
@@ -762,24 +859,23 @@ fn main() {
                             }
                             // Ctrl+Enter: destaca o terminal para uma janela flutuante.
                             Key::CtrlEnter => {
-                                let id = next_terminal_id;
-                                next_terminal_id += 1;
-                                let title = format!("Terminal {}", id);
                                 // Área utilizável: linhas 1..=h-4 (dock ocupa h-3..h-1).
-                                let usable_h = last_size.1.saturating_sub(4); // = h-4 = último row válido
-                                let tw = (last_size.0 / 2).max(30).min(last_size.0.saturating_sub(6));
-                                let th = (usable_h * 2 / 3).max(8).min(usable_h);
-                                let tx = (last_size.0.saturating_sub(tw)) / 2;
-                                let ty = 1 + usable_h.saturating_sub(th) / 2;
-                                let win  = Window::new(tx, ty, tw, th, 0);
+                                let _usable_h = last_size.1.saturating_sub(4); // = h-4 = último row válido
                                 let cmds = std::mem::take(&mut commands);
                                 cmd_input.clear();
                                 panel_scroll = 0;
-                                applications.push(Application::terminal_window(
-                                    title, win, current_path.clone(), cmds,
-                                ));
+                                let app_idx = spawn_terminal_window(
+                                    &mut applications,
+                                    &mut next_terminal_id,
+                                    current_desktop,
+                                    last_size.0,
+                                    last_size.1,
+                                    &current_path,
+                                    cmds,
+                                );
+                                place_pointer_on_terminal_input(&mut pointer, &applications, app_idx, last_size.0, last_size.1);
                                 // Foca imediatamente a nova janela terminal.
-                                mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
+                                mode = Mode::TerminalFocus { app_idx };
                                 mode_changed = true;
                             }
                             Key::PageUp => {
@@ -902,8 +998,10 @@ fn main() {
             if matches!(&mode, Mode::Normal) {
                 let sb_x = last_size.0.saturating_sub(1);
                 if pointer.x == sb_x {
-                    let minimized_count = applications.iter().filter(|a| a.is_minimized()).count();
-                    let tab_count = tab_layout(&applications, last_size.1, tab_scroll).len();
+                    let minimized_count = applications.iter()
+                        .filter(|a| a.on_desktop(current_desktop) && a.is_minimized())
+                        .count();
+                    let tab_count = tab_layout(&applications, current_desktop, last_size.1, tab_scroll).len();
                     if minimized_count <= tab_count {
                         pointer.x = sb_x.saturating_sub(1);
                     } else {
@@ -946,11 +1044,11 @@ fn main() {
                 pointer.y = new_size.1 - (last_size.1 - pointer.y);
                 last_size = new_size;
                 pointer.clamp_to_bounds(last_size.0, last_size.1);
-                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, last_size.1));
+                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, current_desktop, last_size.1));
             }
             // Só anima o título da aba sob o cursor
             let tab_x = last_size.0.saturating_sub(3);
-            let needs_scroll = tab_layout(&applications, last_size.1, tab_scroll)
+            let needs_scroll = tab_layout(&applications, current_desktop, last_size.1, tab_scroll)
                 .iter()
                 .any(|&(idx, tab_y, tab_h)| {
                     let is_hovered = pointer.x >= tab_x

@@ -28,6 +28,7 @@ impl TerminalState {
 pub struct Application {
     pub title:    String,
     pub display:  DisplayMode,
+    pub desktop:  usize,
     /// Janelas de menu fecham ao perder o foco.
     pub is_menu:  bool,
     /// Presente em janelas de terminal; ausente em janelas comuns.
@@ -42,11 +43,11 @@ pub enum DisplayMode {
 
 impl Application {
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: false, terminal: None }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: false, terminal: None }
     }
 
     pub fn menu(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), is_menu: true, terminal: None }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: true, terminal: None }
     }
 
     /// Cria uma janela de terminal com histórico de comandos pré-carregado.
@@ -54,9 +55,19 @@ impl Application {
         Self {
             title:    title.into(),
             display:  DisplayMode::Windowed(window),
+            desktop:  1,
             is_menu:  false,
             terminal: Some(TerminalState::new(path, commands)),
         }
+    }
+
+    pub fn with_desktop(mut self, desktop: usize) -> Self {
+        self.desktop = desktop;
+        self
+    }
+
+    pub fn on_desktop(&self, desktop: usize) -> bool {
+        self.desktop == desktop
     }
 
     pub fn window(&self) -> Option<&Window> {

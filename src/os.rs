@@ -66,6 +66,10 @@ pub enum Key {
     Home,
     PageUp,
     PageDown,
+    Ctrl1,
+    Ctrl2,
+    Ctrl3,
+    Ctrl4,
     CtrlDelete,
     CtrlC,
     CtrlD,
@@ -388,6 +392,10 @@ mod platform {
                 let ch   = ke_char(&rec.event);
                 let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
 
+                if ctrl && vk == 0x31 { return Key::Ctrl1; }
+                if ctrl && vk == 0x32 { return Key::Ctrl2; }
+                if ctrl && vk == 0x33 { return Key::Ctrl3; }
+                if ctrl && vk == 0x34 { return Key::Ctrl4; }
                 if ctrl && vk == 0x2E { return Key::CtrlDelete; }
                 if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
                 if ctrl && vk == 0x44 { return Key::CtrlD; }
