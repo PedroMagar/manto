@@ -61,32 +61,3 @@ pub fn tick_all(commands: &mut Vec<CommandEntry>) -> bool {
     changed
 }
 
-/// Constrói as linhas de conteúdo do painel com estrutura em árvore.
-/// Retorna todas as linhas sem nenhum colapso — a rolagem e os indicadores
-/// `├─ ...` são gerenciados pelo `draw_command_panel`.
-#[allow(dead_code)]
-pub fn build_panel_lines(commands: &[CommandEntry], path: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    if !path.is_empty() {
-        lines.push(path.to_string());
-    }
-    for entry in commands {
-        let has_out = !entry.output_lines.is_empty();
-        let cmd_pre = if has_out { "  ├─┬ " } else { "  ├─ " };
-        lines.push(format!("{}{}", cmd_pre, entry.command));
-        let all_out = &entry.output_lines;
-        let last_idx = all_out.len().saturating_sub(1);
-        for (j, out_line) in all_out.iter().enumerate() {
-            let is_last = j == last_idx;
-            let branch = if is_last { "└─ " } else { "│─ " };
-            let suffix = if is_last {
-                match entry.status {
-                    CommandStatus::Running  => " (running)",
-                    CommandStatus::Complete => "",
-                }
-            } else { "" };
-            lines.push(format!("  │ {}{}{}", branch, out_line, suffix));
-        }
-    }
-    lines
-}

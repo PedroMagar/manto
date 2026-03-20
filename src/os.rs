@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 // ── Writer ────────────────────────────────────────────────────────────────────
 // No seu OS: escreva para um framebuffer de texto, porta serial, etc.
 
-pub struct Writer(io::Stdout);
+pub struct Writer(io::BufWriter<io::Stdout>);
 
 impl Writer {
     pub fn new() -> Self {
-        Self(io::stdout())
+        Self(io::BufWriter::new(io::stdout()))
     }
 }
 
