@@ -298,17 +298,13 @@ fn render(
     // 1. Fundo do desktop (sem barra de status)
     draw_desktop(out, 1, w, h, "Manto");
 
-    // 2. Janelas (chrome)
+    // 2. Janelas em ordem de empilhamento: chrome e conteúdo na mesma passada.
     for app in applications {
         if let Some(win) = app.window() {
             win.draw(out, &app.title);
-        }
-    }
-
-    // 2.5. Conteúdo das janelas terminais (sobre o chrome já desenhado)
-    for app in applications.iter() {
-        if let (Some(term), Some(win)) = (app.terminal.as_ref(), app.window()) {
-            draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
+            if let Some(term) = app.terminal.as_ref() {
+                draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
+            }
         }
     }
 
