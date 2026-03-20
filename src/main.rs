@@ -26,6 +26,17 @@ enum Mode {
     TerminalFocus   { app_idx: usize },
 }
 
+enum SnapRegion {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// Retorna o índice da janela visualmente no topo na posição (x, y).
 fn topmost_window_at(applications: &[Application], x: u16, y: u16) -> Option<usize> {
     applications.iter().rposition(|app| {
@@ -69,6 +80,199 @@ fn max_tab_scroll(applications: &[Application], screen_h: u16) -> usize {
     let tab_h: u16 = if (total as u16) * 8 <= usable_h { 8 } else { 6 };
     let max_visible = (usable_h / tab_h) as usize;
     total.saturating_sub(max_visible)
+}
+
+fn active_window_idx(applications: &[Application], mode: &Mode) -> Option<usize> {
+    match mode {
+        Mode::Moving { app_idx, .. }
+        | Mode::Resizing { app_idx }
+        | Mode::TerminalFocus { app_idx } => applications
+            .get(*app_idx)
+            .and_then(|app| app.window())
+            .map(|_| *app_idx),
+        Mode::Normal => applications.iter().enumerate()
+            .rfind(|(_, app)| app.window().is_some())
+            .map(|(idx, _)| idx),
+        Mode::Typing => None,
+    }
+}
+
+fn close_active_window(applications: &mut Vec<Application>, mode: &mut Mode, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    let Some(idx) = active_window_idx(applications, mode) else {
+        return false;
+    };
+
+    let can_close = applications.get(idx)
+        .and_then(|app| app.window())
+        .map_or(false, |win| win.closable);
+
+    if !can_close {
+        return false;
+    }
+
+    applications.remove(idx);
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    *mode = Mode::Normal;
+    true
+}
+
+fn bring_window_to_front(applications: &mut Vec<Application>, idx: usize) -> usize {
+    if idx >= applications.len() || idx == applications.len() - 1 {
+        idx
+    } else {
+        let app = applications.remove(idx);
+        applications.push(app);
+        applications.len() - 1
+    }
+}
+
+fn spawn_terminal_window(
+    applications: &mut Vec<Application>,
+    next_terminal_id: &mut usize,
+    screen_w: u16,
+    screen_h: u16,
+    path: &str,
+    commands: Vec<CommandEntry>,
+) -> usize {
+    let id = *next_terminal_id;
+    *next_terminal_id += 1;
+    let title = format!("Terminal {}", id);
+    let usable_h = screen_h.saturating_sub(4);
+    let tw = (screen_w / 2).max(30).min(screen_w.saturating_sub(6));
+    let th = (usable_h * 2 / 3).max(8).min(usable_h);
+    let tx = (screen_w.saturating_sub(tw)) / 2;
+    let ty = 1 + usable_h.saturating_sub(th) / 2;
+    let win = Window::new(tx, ty, tw, th, 0);
+    applications.push(Application::terminal_window(title, win, path.to_string(), commands));
+    applications.len() - 1
+}
+
+fn toggle_start_menu(applications: &mut Vec<Application>, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    if let Some(idx) = applications.iter().position(|a| a.is_menu) {
+        applications.remove(idx);
+    } else {
+        let usable_h = screen_h.saturating_sub(4);
+        let win_h = (usable_h * 3 / 4).max(MIN_H);
+        let pos_y = screen_h.saturating_sub(3).saturating_sub(win_h);
+        applications.push(Application::menu(
+            "Start",
+            Window::new(2, pos_y, 20, win_h, 0).without_chrome(),
+        ));
+    }
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    true
+}
+
+fn toggle_active_maximize(applications: &mut [Application], mode: &Mode, screen_w: u16, screen_h: u16) -> bool {
+    let Some(idx) = active_window_idx(applications, mode) else {
+        return false;
+    };
+
+    if applications[idx].is_maximized() {
+        applications[idx].restore_maximize();
+    } else {
+        applications[idx].maximize(screen_w, screen_h);
+    }
+    true
+}
+
+fn minimize_active_window(applications: &mut Vec<Application>, mode: &mut Mode, screen_h: u16, tab_scroll: &mut usize) -> bool {
+    let Some(idx) = active_window_idx(applications, mode) else {
+        return false;
+    };
+
+    let can_minimize = applications.get(idx)
+        .and_then(|app| app.window())
+        .map_or(false, |win| win.minimizable);
+    if !can_minimize {
+        return false;
+    }
+
+    if applications[idx].is_maximized() {
+        applications[idx].restore_maximize();
+    }
+    applications[idx].minimize();
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, screen_h));
+    *mode = Mode::Normal;
+    true
+}
+
+fn focus_relative_window(applications: &mut Vec<Application>, mode: &mut Mode, backward: bool) -> bool {
+    let visible: Vec<usize> = applications.iter().enumerate()
+        .filter(|(_, app)| app.window().is_some())
+        .map(|(idx, _)| idx)
+        .collect();
+    if visible.len() <= 1 {
+        return false;
+    }
+
+    let active = active_window_idx(applications, mode).unwrap_or(*visible.last().unwrap());
+    let current_pos = visible.iter().position(|&idx| idx == active).unwrap_or(visible.len() - 1);
+    let target_pos = if backward {
+        current_pos.checked_sub(1).unwrap_or(visible.len() - 1)
+    } else {
+        (current_pos + 1) % visible.len()
+    };
+
+    bring_window_to_front(applications, visible[target_pos]);
+    *mode = Mode::Normal;
+    true
+}
+
+fn snap_rect(screen_w: u16, screen_h: u16, region: SnapRegion) -> (u16, u16, u16, u16) {
+    let area_x = 2;
+    let area_y = 1;
+    let area_w = screen_w.saturating_sub(5).max(MIN_W);
+    let area_h = screen_h.saturating_sub(4).max(MIN_H);
+
+    let left_w = (area_w / 2).max(MIN_W);
+    let right_w = area_w.saturating_sub(left_w).max(MIN_W);
+    let top_h = (area_h / 2).max(MIN_H);
+    let bottom_h = area_h.saturating_sub(top_h).max(MIN_H);
+
+    match region {
+        SnapRegion::Left => (area_x, area_y, left_w, area_h),
+        SnapRegion::Right => {
+            (area_x + area_w.saturating_sub(right_w), area_y, right_w, area_h)
+        }
+        SnapRegion::Top => (area_x, area_y, area_w, top_h),
+        SnapRegion::Bottom => {
+            (area_x, area_y + area_h.saturating_sub(bottom_h), area_w, bottom_h)
+        }
+        SnapRegion::TopLeft => (area_x, area_y, left_w, top_h),
+        SnapRegion::TopRight => (area_x + area_w.saturating_sub(right_w), area_y, right_w, top_h),
+        SnapRegion::BottomLeft => (area_x, area_y + area_h.saturating_sub(bottom_h), left_w, bottom_h),
+        SnapRegion::BottomRight => (
+            area_x + area_w.saturating_sub(right_w),
+            area_y + area_h.saturating_sub(bottom_h),
+            right_w,
+            bottom_h,
+        ),
+    }
+}
+
+fn snap_active_window(
+    applications: &mut [Application],
+    mode: &mut Mode,
+    screen_w: u16,
+    screen_h: u16,
+    region: SnapRegion,
+) -> bool {
+    let Some(idx) = active_window_idx(applications, mode) else {
+        return false;
+    };
+
+    let can_resize = applications.get(idx)
+        .and_then(|app| app.window())
+        .map_or(false, |win| win.resizable);
+    if !can_resize {
+        return false;
+    }
+
+    let (x, y, w, h) = snap_rect(screen_w, screen_h, region);
+    applications[idx].set_window_geometry(x, y, w.max(MIN_W), h.max(MIN_H));
+    *mode = Mode::Normal;
+    true
 }
 
 fn render(
@@ -280,29 +484,98 @@ fn main() {
             let mut mode_changed = false;
 
             match key {
-                Key::CtrlC => break,
-                Key::Char('q') if !matches!(mode, Mode::Typing) => break,
+                Key::CtrlDelete => break,
+                Key::CtrlF => {
+                    if toggle_active_maximize(&mut applications, &mode, last_size.0, last_size.1) {
+                        mode_changed = true;
+                    }
+                }
+                Key::CtrlN => {
+                    if focus_relative_window(&mut applications, &mut mode, false) {
+                        mode_changed = true;
+                    }
+                }
+                Key::CtrlP => {
+                    if focus_relative_window(&mut applications, &mut mode, true) {
+                        mode_changed = true;
+                    }
+                }
+                Key::CtrlW => {
+                    if close_active_window(&mut applications, &mut mode, last_size.1, &mut tab_scroll) {
+                        mode_changed = true;
+                    }
+                }
 
                 // Ctrl+T: novo terminal vazio, de qualquer modo.
                 Key::CtrlT => {
-                    let id = next_terminal_id;
-                    next_terminal_id += 1;
-                    let title = format!("Terminal {}", id);
-                    let usable_h = last_size.1.saturating_sub(4);
-                    let tw = (last_size.0 / 2).max(30).min(last_size.0.saturating_sub(6));
-                    let th = (usable_h * 2 / 3).max(8).min(usable_h);
-                    let tx = (last_size.0.saturating_sub(tw)) / 2;
-                    let ty = 1 + usable_h.saturating_sub(th) / 2;
-                    let win = Window::new(tx, ty, tw, th, 0);
-                    applications.push(Application::terminal_window(
-                        title, win, current_path.clone(), Vec::new(),
-                    ));
-                    mode = Mode::TerminalFocus { app_idx: applications.len() - 1 };
+                    let app_idx = spawn_terminal_window(
+                        &mut applications,
+                        &mut next_terminal_id,
+                        last_size.0,
+                        last_size.1,
+                        &current_path,
+                        Vec::new(),
+                    );
+                    mode = Mode::TerminalFocus { app_idx };
                     mode_changed = true;
                 }
 
                 _ => match &mut mode {
                     Mode::Normal => match key {
+                        Key::CtrlQ => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::TopLeft) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlE => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::TopRight) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlZ => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::BottomLeft) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlV => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::BottomRight) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlH | Key::Backspace => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Left) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlL => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Right) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlK => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Top) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlJ => {
+                            if snap_active_window(&mut applications, &mut mode, last_size.0, last_size.1, SnapRegion::Bottom) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::Char(digit @ '1'..='4') => {
+                            current_desktop = digit.to_digit(10).unwrap_or(1) as usize;
+                            mode_changed = true;
+                        }
+                        Key::CtrlD => {
+                            if toggle_start_menu(&mut applications, last_size.1, &mut tab_scroll) {
+                                mode_changed = true;
+                            }
+                        }
+                        Key::CtrlX => {
+                            if minimize_active_window(&mut applications, &mut mode, last_size.1, &mut tab_scroll) {
+                                mode_changed = true;
+                            }
+                        }
                         Key::Up    => pointer.move_up(),
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
@@ -335,18 +608,7 @@ fn main() {
                                 && pointer.x >= STATUS_START_X
                                 && pointer.x < start_end
                             {
-                                if let Some(idx) = applications.iter().position(|a| a.is_menu) {
-                                    applications.remove(idx);
-                                } else {
-                                    let usable_h = last_size.1.saturating_sub(4);
-                                    let win_h = (usable_h * 3 / 4).max(MIN_H);
-                                    let pos_y  = last_size.1.saturating_sub(3).saturating_sub(win_h);
-                                    applications.push(Application::menu(
-                                        "Start",
-                                        Window::new(2, pos_y, 20, win_h, 0).without_chrome(),
-                                    ));
-                                }
-                                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, last_size.1));
+                                toggle_start_menu(&mut applications, last_size.1, &mut tab_scroll);
                                 mode_changed = true;
                             // Scrollbar (coluna mais à direita): metade superior sobe, inferior desce
                             } else if pointer.x == sb_x {

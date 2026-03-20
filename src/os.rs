@@ -60,12 +60,28 @@ pub enum Key {
     Right,
     Enter,
     Backspace,
+    Delete,
     Escape,
     End,
     Home,
     PageUp,
     PageDown,
+    CtrlDelete,
     CtrlC,
+    CtrlD,
+    CtrlE,
+    CtrlF,
+    CtrlH,
+    CtrlJ,
+    CtrlK,
+    CtrlL,
+    CtrlN,
+    CtrlP,
+    CtrlQ,
+    CtrlW,
+    CtrlV,
+    CtrlX,
+    CtrlZ,
     CtrlEnter,
     CtrlT,
 }
@@ -141,6 +157,19 @@ mod platform {
             std::io::stdin().read_exact(&mut buf).unwrap();
             match buf[0] {
                 3        => return Key::CtrlC,
+                4        => return Key::CtrlD,
+                5        => return Key::CtrlE,
+                6        => return Key::CtrlF,
+                10       => return Key::CtrlJ,
+                11       => return Key::CtrlK,
+                12       => return Key::CtrlL,
+                14       => return Key::CtrlN,
+                16       => return Key::CtrlP,
+                17       => return Key::CtrlQ,
+                23       => return Key::CtrlW,
+                22       => return Key::CtrlV,
+                24       => return Key::CtrlX,
+                26       => return Key::CtrlZ,
                 20       => return Key::CtrlT,
                 8 | 127  => return Key::Backspace,
                 13       => return Key::Enter,
@@ -156,14 +185,25 @@ mod platform {
                                 b'D' => return Key::Left,
                                 b'F' => return Key::End,
                                 b'H' => return Key::Home,
-                                b'5' | b'6' => {
-                                    let mut term = [0u8; 1];
-                                    std::io::stdin().read_exact(&mut term).unwrap();
-                                    if term[0] == b'~' {
-                                        if seq[1] == b'5' { return Key::PageUp; }
-                                        else { return Key::PageDown; }
+                                b'0'..=b'9' => {
+                                    let mut params = vec![seq[1]];
+                                    loop {
+                                        let mut next = [0u8; 1];
+                                        std::io::stdin().read_exact(&mut next).unwrap();
+                                        match next[0] {
+                                            b'~' => {
+                                                match params.as_slice() {
+                                                    b"3" => return Key::Delete,
+                                                    b"3;5" => return Key::CtrlDelete,
+                                                    b"5" => return Key::PageUp,
+                                                    b"6" => return Key::PageDown,
+                                                    _ => continue,
+                                                }
+                                            }
+                                            b'A'..=b'Z' | b'a'..=b'z' => continue,
+                                            _ => params.push(next[0]),
+                                        }
                                     }
-                                    continue;
                                 }
                                 _    => continue,
                             }
@@ -348,7 +388,22 @@ mod platform {
                 let ch   = ke_char(&rec.event);
                 let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
 
+                if ctrl && vk == 0x2E { return Key::CtrlDelete; }
                 if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
+                if ctrl && vk == 0x44 { return Key::CtrlD; }
+                if ctrl && vk == 0x45 { return Key::CtrlE; }
+                if ctrl && vk == 0x46 { return Key::CtrlF; }
+                if ctrl && vk == 0x48 { return Key::CtrlH; }
+                if ctrl && vk == 0x4A { return Key::CtrlJ; }
+                if ctrl && vk == 0x4B { return Key::CtrlK; }
+                if ctrl && vk == 0x4C { return Key::CtrlL; }
+                if ctrl && vk == 0x4E { return Key::CtrlN; }
+                if ctrl && vk == 0x50 { return Key::CtrlP; }
+                if ctrl && vk == 0x51 { return Key::CtrlQ; }
+                if ctrl && vk == 0x56 { return Key::CtrlV; }
+                if ctrl && vk == 0x57 { return Key::CtrlW; }
+                if ctrl && vk == 0x58 { return Key::CtrlX; }
+                if ctrl && vk == 0x5A { return Key::CtrlZ; }
                 if ctrl && vk == 0x54 { return Key::CtrlT; }
 
                 // Para Ctrl+Enter usamos GetKeyState (estado real-time) porque
@@ -361,6 +416,7 @@ mod platform {
 
                 match vk {
                     0x08 => return Key::Backspace,
+                    0x2E => return Key::Delete,
                     0x1B => return Key::Escape,
                     0x21 => return Key::PageUp,
                     0x22 => return Key::PageDown,

@@ -124,4 +124,27 @@ impl Application {
             other => other,
         };
     }
+
+    pub fn set_window_geometry(&mut self, position_x: u16, position_y: u16, width: u16, height: u16) {
+        let template = match &self.display {
+            DisplayMode::Windowed(w) => Some(w),
+            DisplayMode::Maximized { display, .. } => Some(display),
+            DisplayMode::Minimized(_) => None,
+        };
+
+        let Some(template) = template else {
+            return;
+        };
+
+        let mut win = Window::new(position_x, position_y, width, height, template.layer);
+        win.minimizable = template.minimizable;
+        win.closable = template.closable;
+        win.draggable = template.draggable;
+        win.resizable = template.resizable;
+        win.content_w = template.content_w;
+        win.content_h = template.content_h;
+        win.scroll_x = template.scroll_x;
+        win.scroll_y = template.scroll_y;
+        self.display = DisplayMode::Windowed(win);
+    }
 }
