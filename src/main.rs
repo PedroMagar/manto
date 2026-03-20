@@ -6,7 +6,7 @@ mod shell;
 mod terminal;
 mod window;
 
-use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel, tab_char_at, scrollbar_thumb, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X};
+use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel, tab_char_at, scrollbar_thumb, desktop_at, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X, DESKTOP_AREA_LEN};
 use shell::{CommandEntry, tick_all};
 pub use application::Application;
 use window::{Window, MIN_W, MIN_H};
@@ -81,6 +81,7 @@ fn render(
     typing_input: Option<&str>,
     commands: &[CommandEntry],
     panel_scroll: usize,
+    current_desktop: usize,
 ) {
     terminal::clear(out);
 
@@ -123,7 +124,7 @@ fn render(
     draw_command_panel(out, w, h, path, commands, panel_scroll);
 
     // 6. Barra de status — sempre por cima de tudo
-    draw_status_bar(out, w, h, path, !commands.is_empty());
+    draw_status_bar(out, w, h, path, !commands.is_empty(), current_desktop);
 
     // 7. Hover no botão Start
     let start_end = STATUS_START_X + STATUS_START.len() as u16;
@@ -132,9 +133,17 @@ fn render(
         write!(out, "{}{}{}", terminal::REVERSE, STATUS_START, terminal::RESET).unwrap();
     }
 
+    // 7.5. Hover nos botões de desktop
+    if let Some(d) = desktop_at(pointer.x, pointer.y, w, h) {
+        let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
+        let sep_x  = base_x + (d as u16 - 1) * 4;
+        terminal::move_to(out, sep_x + 1, h - 2);
+        write!(out, "{} {} {}", terminal::REVERSE, d, terminal::RESET).unwrap();
+    }
+
     // 8. Cursor: real (typing) ou ponteiro (░ / reverse)
     if let Some(input) = typing_input {
-        let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
+        let max_len = (w - 1).saturating_sub(CMD_INPUT_X + DESKTOP_AREA_LEN) as usize;
         let display = if input.len() > max_len { &input[input.len() - max_len..] } else { input };
         terminal::move_to(out, CMD_INPUT_X, h - 2);
         write!(out, "{:<width$}", display, width = max_len).unwrap();
@@ -170,6 +179,13 @@ fn render(
                 return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
             }
 
+            if let Some(d) = desktop_at(px, py, w, h) {
+                let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
+                let sep_x  = base_x + (d as u16 - 1) * 4;
+                let offset = px - (sep_x + 1);
+                return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
+            }
+
             if let Some(top_idx) = topmost_window_at(applications, px, py) {
                 if let Some(win) = applications[top_idx].window() {
                     if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
@@ -195,9 +211,10 @@ fn main() {
     out.flush().unwrap();
 
     let mut mode             = Mode::Normal;
-    let mut scroll_offset: usize = 0;
-    let mut tab_scroll:    usize = 0;
-    let mut panel_scroll:  usize = 0;
+    let mut scroll_offset:    usize = 0;
+    let mut tab_scroll:       usize = 0;
+    let mut panel_scroll:     usize = 0;
+    let mut current_desktop:  usize = 1;
     let mut last_space_time: Option<Clock> = None;
     let current_path         = String::from("./");
     let mut cmd_input        = String::new();
@@ -219,7 +236,7 @@ fn main() {
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
     let in_shell = matches!(mode, Mode::Typing);
     let shell_path = if in_shell { current_path.as_str() } else { "" };
-    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
+    render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
 
     let mut last_check = Clock::now();
 
@@ -251,8 +268,12 @@ fn main() {
                             let sb_bot = last_size.1.saturating_sub(4);
                             let tab_x  = last_size.0.saturating_sub(3);
 
+                            // Botões de desktop (prioridade sobre área de comando)
+                            if let Some(d) = desktop_at(pointer.x, pointer.y, last_size.0, last_size.1) {
+                                current_desktop = d;
+                                mode_changed = true;
                             // Área de comando na barra de status
-                            if pointer.y == last_size.1 - 2 && pointer.x >= CMD_INPUT_X {
+                            } else if pointer.y == last_size.1 - 2 && pointer.x >= CMD_INPUT_X {
                                 mode = Mode::Typing;
                                 panel_scroll = 0;
                                 mode_changed = true;
@@ -510,7 +531,7 @@ fn main() {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
                 let in_shell = matches!(mode, Mode::Typing);
                 let shell_path = if in_shell { current_path.as_str() } else { "" };
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
             }
         }
 
@@ -540,7 +561,7 @@ fn main() {
                 let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
                 let in_shell = matches!(mode, Mode::Typing);
                 let shell_path = if in_shell { current_path.as_str() } else { "" };
-                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll);
+                render(&mut out, &applications, preview, cursor, last_size.0, last_size.1, &pointer, scroll_offset, tab_scroll, shell_path, if in_shell { Some(&cmd_input) } else { None }, if in_shell { &commands } else { &[] }, panel_scroll, current_desktop);
             }
             last_check = Clock::now();
         }

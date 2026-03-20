@@ -9,6 +9,10 @@ pub const STATUS_START: &str = " Start ";
 pub const STATUS_START_X: u16 = 1;
 /// Coluna X onde começa a área de entrada de comando (após o prefixo completo).
 pub const CMD_INPUT_X: u16 = 1 + STATUS_BAR_PREFIX.len() as u16;
+/// Número de desktops virtuais exibidos na barra de status.
+pub const DESKTOP_COUNT: usize = 4;
+/// Largura visual da área de desktop na barra: "| N " × DESKTOP_COUNT = 16 colunas.
+pub const DESKTOP_AREA_LEN: u16 = DESKTOP_COUNT as u16 * 4;
 
 pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &str) {
     match theme {
@@ -31,7 +35,7 @@ pub fn draw_desktop(out: &mut impl Write, theme: u16, w: u16, h: u16, title: &st
 }
 
 /// Desenha a barra de status (3 linhas inferiores).
-pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_open: bool) {
+pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_open: bool, current_desktop: usize) {
     let inner = (w - 2) as usize;
     let (cl, cr) = if panel_open { ('├', '┤') } else { ('┌', '┐') };
     terminal::move_to(out, 0, h - 3);
@@ -43,9 +47,38 @@ pub fn draw_status_bar(out: &mut impl Write, w: u16, h: u16, path: &str, panel_o
         write!(out, "{}{}{:─<width$}{}", cl, label, "", cr, width = fill).unwrap();
     }
     terminal::move_to(out, 0, h - 2);
-    write!(out, "│{:<1$}│", STATUS_BAR_PREFIX, inner).unwrap();
+    let prefix_len  = STATUS_BAR_PREFIX.chars().count();
+    let desktop_len = DESKTOP_COUNT * 4; // "| N " × 4 = 16 colunas visuais
+    let pad = inner.saturating_sub(prefix_len + desktop_len);
+    write!(out, "│{}{:<pad$}", STATUS_BAR_PREFIX, "", pad = pad).unwrap();
+    for d in 1..=DESKTOP_COUNT {
+        write!(out, "|").unwrap();
+        if d == current_desktop {
+            write!(out, "{} {} {}", terminal::REVERSE, d, terminal::RESET).unwrap();
+        } else {
+            write!(out, " {} ", d).unwrap();
+        }
+    }
+    write!(out, "│").unwrap();
     terminal::move_to(out, 0, h - 1);
     write!(out, "└{:─<1$}┘", "", inner).unwrap();
+}
+
+/// Retorna o índice (1-based) do botão de desktop em (x, y), ou None.
+/// Cada botão ocupa 3 colunas visuais ` N `, separadas por `|`.
+/// Layout (da esquerda para direita): `| 1 | 2 | 3 | 4 │`
+pub fn desktop_at(x: u16, y: u16, w: u16, h: u16) -> Option<usize> {
+    if y != h - 2 { return None; }
+    let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN); // coluna do primeiro '|'
+    for d in 1..=DESKTOP_COUNT {
+        let sep_x = base_x + (d as u16 - 1) * 4;
+        let btn_start = sep_x + 1;
+        let btn_end   = sep_x + 3;
+        if x >= btn_start && x <= btn_end {
+            return Some(d);
+        }
+    }
+    None
 }
 
 fn tab_content_char(title: &str, content_rows: usize, row: usize, scroll_offset: usize) -> char {
