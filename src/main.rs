@@ -518,16 +518,7 @@ fn main() {
     let mut last_size     = os::size();
     let mut pointer       = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
-    let mut applications = vec![
-        // Conteúdo cabe na janela — sem scrollbars
-        Application::windowed("Test",  Window::new(2,  1,  17, 8, 0)),
-        // Conteúdo mais alto — scrollbar vertical
-        Application::windowed("Test2", Window::new(22, 1,  17, 8, 0).with_content(0,  20)),
-        // Conteúdo mais largo — scrollbar horizontal
-        Application::windowed("Test3", Window::new(2,  11, 17, 8, 0).with_content(40, 0)),
-        // Conteúdo maior nas duas direções — ambas as scrollbars
-        Application::windowed("Test4", Window::new(22, 11, 17, 8, 0).with_content(40, 20)),
-    ];
+    let mut applications = Vec::new();
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
     let in_shell     = matches!(mode, Mode::Typing);
@@ -689,7 +680,9 @@ fn main() {
                                 }
                                 mode_changed = true;
                             // Área de comando na barra de status
-                            } else if pointer.y == last_size.1 - 2 && pointer.x >= CMD_INPUT_X {
+                            } else if pointer.y == last_size.1 - 2
+                                && pointer.x >= CMD_INPUT_X.saturating_sub(TERMINAL_INPUT_PREFIX.len() as u16)
+                            {
                                 mode = Mode::Typing;
                                 panel_scroll = 0;
                                 mode_changed = true;
