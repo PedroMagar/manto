@@ -24,11 +24,31 @@ use std::time::Duration;
 enum Mode {
     Normal,
     Moving          { app_idx: usize, offset_x: u16 },
-    Resizing        { app_idx: usize },
+    Resizing        { app_idx: usize, edit: Option<ResizeEditState> },
     Typing,
     TerminalFocus   { app_idx: usize },
 }
 
+#[derive(Clone, Copy)]
+enum ResizeAxis {
+    Width,
+    Height,
+}
+
+#[derive(Clone, Copy)]
+enum ResizeOp {
+    Add,
+    Sub,
+    Set,
+}
+
+struct ResizeEditState {
+    axis: ResizeAxis,
+    op: Option<ResizeOp>,
+    value: String,
+}
+
+#[derive(Clone, Copy)]
 enum SnapRegion {
     Left,
     Right,
@@ -38,6 +58,40 @@ enum SnapRegion {
     TopRight,
     BottomLeft,
     BottomRight,
+}
+
+fn resolve_snap_region(key: &Key, held: os::HeldArrowKeys) -> Option<SnapRegion> {
+    match key {
+        Key::AltLeft => Some(if held.up {
+            SnapRegion::TopLeft
+        } else if held.down {
+            SnapRegion::BottomLeft
+        } else {
+            SnapRegion::Left
+        }),
+        Key::AltRight => Some(if held.up {
+            SnapRegion::TopRight
+        } else if held.down {
+            SnapRegion::BottomRight
+        } else {
+            SnapRegion::Right
+        }),
+        Key::AltUp => Some(if held.left {
+            SnapRegion::TopLeft
+        } else if held.right {
+            SnapRegion::TopRight
+        } else {
+            SnapRegion::Top
+        }),
+        Key::AltDown => Some(if held.left {
+            SnapRegion::BottomLeft
+        } else if held.right {
+            SnapRegion::BottomRight
+        } else {
+            SnapRegion::Bottom
+        }),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -525,7 +579,7 @@ fn max_tab_scroll(applications: &[Application], current_desktop: usize, screen_h
 fn active_window_idx(applications: &[Application], mode: &Mode, current_desktop: usize) -> Option<usize> {
     match mode {
         Mode::Moving { app_idx, .. }
-        | Mode::Resizing { app_idx }
+        | Mode::Resizing { app_idx, .. }
         | Mode::TerminalFocus { app_idx } => applications
             .get(*app_idx)
             .filter(|app| app.on_desktop(current_desktop))
@@ -587,6 +641,102 @@ fn spawn_terminal_window(
     let win = Window::new(tx, ty, tw, th, 0);
     applications.push(Application::terminal_window(title, win, path.to_string(), commands).with_desktop(current_desktop));
     applications.len() - 1
+}
+
+fn spawn_terminal_window_at(
+    applications: &mut Vec<Application>,
+    next_terminal_id: &mut usize,
+    current_desktop: usize,
+    position_x: u16,
+    position_y: u16,
+    width: u16,
+    height: u16,
+    path: &str,
+    commands: Vec<CommandEntry>,
+) -> usize {
+    let id = *next_terminal_id;
+    *next_terminal_id += 1;
+    let title = format!("Terminal {}", id);
+    let win = Window::new(position_x, position_y, width, height, 0);
+    applications.push(
+        Application::terminal_window(title, win, path.to_string(), commands)
+            .with_desktop(current_desktop),
+    );
+    applications.len() - 1
+}
+
+#[derive(Clone, Copy)]
+enum SplitDirection {
+    Vertical,
+    Horizontal,
+}
+
+fn split_active_terminal_window(
+    applications: &mut Vec<Application>,
+    mode: &mut Mode,
+    next_terminal_id: &mut usize,
+    current_desktop: usize,
+    direction: SplitDirection,
+) -> Option<usize> {
+    let idx = active_window_idx(applications, mode, current_desktop)?;
+    if applications.get(idx)?.is_menu || applications.get(idx)?.terminal.is_none() {
+        return None;
+    }
+
+    let (x, y, w, h, resizable, path) = {
+        let app = applications.get(idx)?;
+        let win = app.window()?;
+        let path = app.terminal.as_ref()?.path.clone();
+        (win.position_x, win.position_y, win.width, win.height, win.resizable, path)
+    };
+
+    if !resizable {
+        return None;
+    }
+
+    let (current_geom, new_geom) = match direction {
+        SplitDirection::Vertical => {
+            if w < MIN_W.saturating_mul(2) {
+                return None;
+            }
+            let left_w = (w / 2).max(MIN_W);
+            let right_w = w.saturating_sub(left_w).max(MIN_W);
+            (
+                (x, y, left_w, h),
+                (x + w.saturating_sub(right_w), y, right_w, h),
+            )
+        }
+        SplitDirection::Horizontal => {
+            if h < MIN_H.saturating_mul(2) {
+                return None;
+            }
+            let top_h = (h / 2).max(MIN_H);
+            let bottom_h = h.saturating_sub(top_h).max(MIN_H);
+            (
+                (x, y, w, top_h),
+                (x, y + h.saturating_sub(bottom_h), w, bottom_h),
+            )
+        }
+    };
+
+    applications[idx].set_window_geometry(
+        current_geom.0,
+        current_geom.1,
+        current_geom.2,
+        current_geom.3,
+    );
+
+    Some(spawn_terminal_window_at(
+        applications,
+        next_terminal_id,
+        current_desktop,
+        new_geom.0,
+        new_geom.1,
+        new_geom.2,
+        new_geom.3,
+        &path,
+        Vec::new(),
+    ))
 }
 
 fn toggle_start_menu(applications: &mut Vec<Application>, current_desktop: usize, screen_h: u16, tab_scroll: &mut usize) -> bool {
@@ -723,6 +873,10 @@ fn snap_rect(screen_w: u16, screen_h: u16, region: SnapRegion) -> (u16, u16, u16
     }
 }
 
+fn window_matches_geometry(win: &Window, x: u16, y: u16, w: u16, h: u16) -> bool {
+    win.position_x == x && win.position_y == y && win.width == w && win.height == h
+}
+
 fn snap_active_window(
     applications: &mut [Application],
     mode: &mut Mode,
@@ -743,6 +897,26 @@ fn snap_active_window(
     }
 
     let (x, y, w, h) = snap_rect(screen_w, screen_h, region);
+    if matches!(region, SnapRegion::Top) {
+        if applications[idx].is_maximized() {
+            if applications[idx]
+                .saved_window()
+                .map_or(false, |saved| window_matches_geometry(saved, x, y, w, h))
+            {
+                applications[idx].restore_maximize();
+                *mode = Mode::Normal;
+                return true;
+            }
+        } else if applications[idx]
+            .window()
+            .map_or(false, |win| window_matches_geometry(win, x, y, w, h))
+        {
+            applications[idx].maximize(screen_w, screen_h);
+            *mode = Mode::Normal;
+            return true;
+        }
+    }
+
     applications[idx].set_window_geometry(x, y, w.max(MIN_W), h.max(MIN_H));
     *mode = Mode::Normal;
     true
@@ -751,7 +925,7 @@ fn snap_active_window(
 fn mode_targets_desktop(mode: &Mode, applications: &[Application], current_desktop: usize) -> bool {
     match mode {
         Mode::Moving { app_idx, .. }
-        | Mode::Resizing { app_idx }
+        | Mode::Resizing { app_idx, .. }
         | Mode::TerminalFocus { app_idx } => applications
             .get(*app_idx)
             .map_or(false, |app| app.on_desktop(current_desktop)),
@@ -773,6 +947,78 @@ fn place_pointer_on_terminal_input(pointer: &mut Pointer, applications: &[Applic
     pointer.x = input_x.min(max_x);
     pointer.y = input_y;
     pointer.clamp_to_bounds(screen_w, screen_h);
+}
+
+fn enter_active_resize_mode(
+    applications: &[Application],
+    mode: &mut Mode,
+    current_desktop: usize,
+    pointer: &mut Pointer,
+    screen_w: u16,
+    screen_h: u16,
+) -> bool {
+    let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
+        return false;
+    };
+
+    let Some(win) = applications.get(idx).and_then(|app| app.window()) else {
+        return false;
+    };
+
+    if applications[idx].is_maximized() || !win.resizable {
+        return false;
+    }
+
+    pointer.x = win.position_x + win.width.saturating_sub(1);
+    pointer.y = win.position_y + win.height.saturating_sub(1);
+    pointer.clamp_to_bounds(screen_w, screen_h);
+    *mode = Mode::Resizing { app_idx: idx, edit: None };
+    true
+}
+
+fn resize_preview_size(win: &Window, pointer: &Pointer) -> (u16, u16) {
+    (
+        (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W),
+        (pointer.y.saturating_sub(win.position_y) + 1).max(MIN_H),
+    )
+}
+
+fn apply_resize_edit(
+    win: &Window,
+    pointer: &mut Pointer,
+    screen_w: u16,
+    screen_h: u16,
+    edit: &ResizeEditState,
+) -> bool {
+    let Ok(raw_value) = edit.value.parse::<u16>() else {
+        return false;
+    };
+
+    let (width, height) = resize_preview_size(win, pointer);
+    let target = match (edit.axis, edit.op, raw_value) {
+        (_, None, _) => return false,
+        (_, Some(_), 0) => 0,
+        (ResizeAxis::Width, Some(ResizeOp::Add), value) => width.saturating_add(value),
+        (ResizeAxis::Width, Some(ResizeOp::Sub), value) => width.saturating_sub(value),
+        (ResizeAxis::Width, Some(ResizeOp::Set), value) => value,
+        (ResizeAxis::Height, Some(ResizeOp::Add), value) => height.saturating_add(value),
+        (ResizeAxis::Height, Some(ResizeOp::Sub), value) => height.saturating_sub(value),
+        (ResizeAxis::Height, Some(ResizeOp::Set), value) => value,
+    };
+
+    match edit.axis {
+        ResizeAxis::Width => {
+            let width = target.max(MIN_W);
+            pointer.x = win.position_x + width.saturating_sub(1);
+        }
+        ResizeAxis::Height => {
+            let height = target.max(MIN_H);
+            pointer.y = win.position_y + height.saturating_sub(1);
+        }
+    }
+
+    pointer.clamp_to_bounds(screen_w, screen_h);
+    true
 }
 
 fn render(
@@ -1042,47 +1288,52 @@ fn main() {
                     mode = Mode::TerminalFocus { app_idx };
                     mode_changed = true;
                 }
+                Key::AltR => {
+                    if enter_active_resize_mode(
+                        &applications,
+                        &mut mode,
+                        current_desktop,
+                        &mut pointer,
+                        last_size.0,
+                        last_size.1,
+                    ) {
+                        mode_changed = true;
+                    }
+                }
+                Key::AltV => {
+                    if let Some(app_idx) = split_active_terminal_window(
+                        &mut applications,
+                        &mut mode,
+                        &mut next_terminal_id,
+                        current_desktop,
+                        SplitDirection::Vertical,
+                    ) {
+                        place_pointer_on_terminal_input(&mut pointer, &applications, app_idx, last_size.0, last_size.1);
+                        mode = Mode::TerminalFocus { app_idx };
+                        mode_changed = true;
+                    }
+                }
+                Key::AltH => {
+                    if let Some(app_idx) = split_active_terminal_window(
+                        &mut applications,
+                        &mut mode,
+                        &mut next_terminal_id,
+                        current_desktop,
+                        SplitDirection::Horizontal,
+                    ) {
+                        place_pointer_on_terminal_input(&mut pointer, &applications, app_idx, last_size.0, last_size.1);
+                        mode = Mode::TerminalFocus { app_idx };
+                        mode_changed = true;
+                    }
+                }
 
                 _ => match &mut mode {
                     Mode::Normal => match key {
-                        Key::CtrlQ => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::TopLeft) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlE => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::TopRight) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlZ => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::BottomLeft) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlV => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::BottomRight) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlH | Key::Backspace => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Left) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlL => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Right) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlK => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Top) {
-                                mode_changed = true;
-                            }
-                        }
-                        Key::CtrlJ => {
-                            if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, SnapRegion::Bottom) {
-                                mode_changed = true;
+                        Key::AltUp | Key::AltDown | Key::AltLeft | Key::AltRight => {
+                            if let Some(region) = resolve_snap_region(&key, os::held_arrow_keys()) {
+                                if snap_active_window(&mut applications, &mut mode, current_desktop, last_size.0, last_size.1, region) {
+                                    mode_changed = true;
+                                }
                             }
                         }
                         Key::Char(digit @ '1'..='4') => {
@@ -1164,8 +1415,13 @@ fn main() {
 
                                 if let Some(app_idx) = on_tab {
                                     applications[app_idx].restore();
+                                    let restored_idx = bring_window_to_front(&mut applications, app_idx);
                                     tab_scroll = tab_scroll
                                         .min(max_tab_scroll(&applications, current_desktop, last_size.1));
+                                    if applications[restored_idx].terminal.is_some() {
+                                        place_pointer_on_terminal_input(&mut pointer, &applications, restored_idx, last_size.0, last_size.1);
+                                        mode = Mode::TerminalFocus { app_idx: restored_idx };
+                                    }
                                     mode_changed = true;
                                 }
                             // Janela
@@ -1251,7 +1507,7 @@ fn main() {
                                             .min(max_tab_scroll(&applications, current_desktop, last_size.1));
                                         mode_changed = true;
                                     } else if is_resize && !maximized && win_resizable {
-                                        mode = Mode::Resizing { app_idx: top_idx };
+                                        mode = Mode::Resizing { app_idx: top_idx, edit: None };
                                         mode_changed = true;
                                     } else if is_title && win_draggable {
                                         // Duplo toque na barra de título → maximizar / restaurar
@@ -1413,7 +1669,74 @@ fn main() {
                         _ => {}
                     },
 
-                    Mode::Resizing { app_idx } => match key {
+                    Mode::Resizing { app_idx, edit } => match key {
+                        Key::Escape => {
+                            if edit.is_some() {
+                                *edit = None;
+                            } else {
+                                mode = Mode::Normal;
+                            }
+                            mode_changed = true;
+                        }
+                        Key::Char('x') | Key::Char('h') => {
+                            *edit = Some(ResizeEditState { axis: ResizeAxis::Width, op: None, value: String::new() });
+                            mode_changed = true;
+                        }
+                        Key::Char('y') | Key::Char('v') => {
+                            *edit = Some(ResizeEditState { axis: ResizeAxis::Height, op: None, value: String::new() });
+                            mode_changed = true;
+                        }
+                        _ if edit.is_some() => {
+                            let mut clear_edit = false;
+                            let mut changed_pointer = false;
+
+                            if let Some(state) = edit.as_mut() {
+                                match key {
+                                    Key::Char(' ') => {}
+                                    Key::Char('+') if state.op.is_none() => {
+                                        state.op = Some(ResizeOp::Add);
+                                        mode_changed = true;
+                                    }
+                                    Key::Char('-') if state.op.is_none() => {
+                                        state.op = Some(ResizeOp::Sub);
+                                        mode_changed = true;
+                                    }
+                                    Key::Char('=') if state.op.is_none() => {
+                                        state.op = Some(ResizeOp::Set);
+                                        mode_changed = true;
+                                    }
+                                    Key::Char(c) if state.op.is_some() && c.is_ascii_digit() => {
+                                        state.value.push(c);
+                                        mode_changed = true;
+                                    }
+                                    Key::Backspace if state.op.is_some() && !state.value.is_empty() => {
+                                        state.value.pop();
+                                        mode_changed = true;
+                                    }
+                                    Key::Enter => {
+                                        let idx = *app_idx;
+                                        if let Some(win) = applications[idx].window() {
+                                            if !state.value.is_empty() {
+                                                changed_pointer = apply_resize_edit(win, &mut pointer, last_size.0, last_size.1, state);
+                                            }
+                                        }
+                                        clear_edit = true;
+                                        mode_changed = true;
+                                    }
+                                    _ => {
+                                        clear_edit = true;
+                                        mode_changed = true;
+                                    }
+                                }
+                            }
+
+                            if clear_edit {
+                                *edit = None;
+                            }
+                            if changed_pointer {
+                                pointer.clamp_to_bounds(last_size.0, last_size.1);
+                            }
+                        }
                         Key::Up    => pointer.move_up(),
                         Key::Down  => pointer.move_down(last_size.1),
                         Key::Left  => pointer.move_left(),
@@ -1421,8 +1744,9 @@ fn main() {
                         Key::Char(' ') | Key::Enter => {
                             let idx = *app_idx;
                             if let Some(win) = applications[idx].window_mut() {
-                                win.width  = (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W);
-                                win.height = (pointer.y.saturating_sub(win.position_y) + 1).max(MIN_H);
+                                let (width, height) = resize_preview_size(win, &pointer);
+                                win.width = width;
+                                win.height = height;
                             }
                             mode = Mode::Normal;
                             mode_changed = true;
@@ -1631,7 +1955,7 @@ fn compute_render_state(
     pointer: &Pointer,
 ) -> (Option<(usize, u16, u16)>, Option<char>) {
     match mode {
-        Mode::Resizing { app_idx } => {
+        Mode::Resizing { app_idx, .. } => {
             let idx = *app_idx;
             if let Some(win) = applications[idx].window() {
                 let pw = (pointer.x.saturating_sub(win.position_x) + 1).max(MIN_W);
@@ -1715,5 +2039,145 @@ mod tests {
         assert!(input.ends_with(std::path::MAIN_SEPARATOR));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ctrl_arrow_combines_into_quadrant() {
+        assert!(matches!(
+            resolve_snap_region(&Key::AltLeft, os::HeldArrowKeys { up: true, ..Default::default() }),
+            Some(SnapRegion::TopLeft)
+        ));
+        assert!(matches!(
+            resolve_snap_region(&Key::AltUp, os::HeldArrowKeys { left: true, ..Default::default() }),
+            Some(SnapRegion::TopLeft)
+        ));
+    }
+
+    #[test]
+    fn ctrl_arrow_same_axis_stays_half_snap() {
+        assert!(matches!(
+            resolve_snap_region(&Key::AltUp, os::HeldArrowKeys::default()),
+            Some(SnapRegion::Top)
+        ));
+        assert!(matches!(
+            resolve_snap_region(&Key::AltDown, os::HeldArrowKeys::default()),
+            Some(SnapRegion::Bottom)
+        ));
+    }
+
+    #[test]
+    fn alt_r_enters_resize_mode_on_active_window() {
+        let applications = vec![
+            Application::windowed("Test", Window::new(10, 5, 20, 8, 0)),
+        ];
+        let mut mode = Mode::Normal;
+        let mut pointer = Pointer::new(1, 1);
+
+        assert!(enter_active_resize_mode(&applications, &mut mode, 1, &mut pointer, 120, 40));
+        assert!(matches!(mode, Mode::Resizing { app_idx: 0, .. }));
+        assert_eq!(pointer.x, 29);
+        assert_eq!(pointer.y, 12);
+    }
+
+    #[test]
+    fn apply_resize_edit_updates_width_preview() {
+        let win = Window::new(10, 5, 20, 8, 0);
+        let mut pointer = Pointer::new(29, 12);
+        let edit = ResizeEditState {
+            axis: ResizeAxis::Width,
+            op: Some(ResizeOp::Add),
+            value: "5".to_string(),
+        };
+
+        assert!(apply_resize_edit(&win, &mut pointer, 120, 40, &edit));
+        assert_eq!(pointer.x, 34);
+        assert_eq!(pointer.y, 12);
+    }
+
+    #[test]
+    fn apply_resize_edit_sets_height_preview() {
+        let win = Window::new(10, 5, 20, 8, 0);
+        let mut pointer = Pointer::new(29, 12);
+        let edit = ResizeEditState {
+            axis: ResizeAxis::Height,
+            op: Some(ResizeOp::Set),
+            value: "4".to_string(),
+        };
+
+        assert!(apply_resize_edit(&win, &mut pointer, 120, 40, &edit));
+        assert_eq!(pointer.x, 29);
+        assert_eq!(pointer.y, 8);
+    }
+
+    #[test]
+    fn top_snap_toggles_with_maximize_on_repeat() {
+        let mut applications = vec![
+            Application::windowed("Test", Window::new(10, 5, 20, 8, 0)),
+        ];
+        let mut mode = Mode::Normal;
+        let top = snap_rect(120, 40, SnapRegion::Top);
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        let win = applications[0].window().unwrap();
+        assert!(window_matches_geometry(win, top.0, top.1, top.2, top.3));
+        assert!(!applications[0].is_maximized());
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        assert!(applications[0].is_maximized());
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        let win = applications[0].window().unwrap();
+        assert!(window_matches_geometry(win, top.0, top.1, top.2, top.3));
+        assert!(!applications[0].is_maximized());
+    }
+
+    #[test]
+    fn split_vertical_creates_new_terminal_on_right() {
+        let mut applications = vec![
+            Application::terminal_window("Terminal 1", Window::new(10, 5, 20, 8, 0), "D:\\tmp".to_string(), Vec::new()),
+        ];
+        let mut mode = Mode::TerminalFocus { app_idx: 0 };
+        let mut next_terminal_id = 2;
+
+        let new_idx = split_active_terminal_window(
+            &mut applications,
+            &mut mode,
+            &mut next_terminal_id,
+            1,
+            SplitDirection::Vertical,
+        ).unwrap();
+
+        assert_eq!(applications.len(), 2);
+        assert_eq!(new_idx, 1);
+        let left = applications[0].window().unwrap();
+        let right = applications[1].window().unwrap();
+        assert_eq!((left.position_x, left.position_y, left.width, left.height), (10, 5, 10, 8));
+        assert_eq!((right.position_x, right.position_y, right.width, right.height), (20, 5, 10, 8));
+        assert_eq!(applications[1].terminal.as_ref().unwrap().path, "D:\\tmp");
+    }
+
+    #[test]
+    fn split_horizontal_creates_new_terminal_below() {
+        let mut applications = vec![
+            Application::terminal_window("Terminal 1", Window::new(10, 5, 20, 8, 0), "D:\\tmp".to_string(), Vec::new()),
+        ];
+        let mut mode = Mode::TerminalFocus { app_idx: 0 };
+        let mut next_terminal_id = 2;
+
+        let new_idx = split_active_terminal_window(
+            &mut applications,
+            &mut mode,
+            &mut next_terminal_id,
+            1,
+            SplitDirection::Horizontal,
+        ).unwrap();
+
+        assert_eq!(applications.len(), 2);
+        assert_eq!(new_idx, 1);
+        let top = applications[0].window().unwrap();
+        let bottom = applications[1].window().unwrap();
+        assert_eq!((top.position_x, top.position_y, top.width, top.height), (10, 5, 20, 4));
+        assert_eq!((bottom.position_x, bottom.position_y, bottom.width, bottom.height), (10, 9, 20, 4));
+        assert_eq!(applications[1].terminal.as_ref().unwrap().path, "D:\\tmp");
     }
 }

@@ -71,6 +71,10 @@ pub enum Key {
     Ctrl2,
     Ctrl3,
     Ctrl4,
+    AltUp,
+    AltDown,
+    AltLeft,
+    AltRight,
     CtrlDelete,
     CtrlC,
     CtrlD,
@@ -87,8 +91,19 @@ pub enum Key {
     CtrlV,
     CtrlX,
     CtrlZ,
+    AltH,
+    AltR,
+    AltV,
     CtrlEnter,
     CtrlT,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeldArrowKeys {
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
 }
 
 // ── Plataforma ────────────────────────────────────────────────────────────────
@@ -100,7 +115,7 @@ pub enum Key {
 //   poll(ms: u64) -> bool  — true se há input disponível dentro do timeout
 //   read_key() -> Key      — lê e decodifica a próxima tecla
 
-pub use platform::{enable_raw_mode, disable_raw_mode, size, poll, read_key};
+pub use platform::{enable_raw_mode, disable_raw_mode, size, poll, read_key, held_arrow_keys};
 
 // ─── Unix (Linux, macOS, Redox) ──────────────────────────────────────────────
 #[cfg(unix)]
@@ -181,10 +196,12 @@ mod platform {
                 13       => return Key::Enter,
                 27 => {
                     if poll(10) {
-                        let mut seq = [0u8; 2];
-                        std::io::stdin().read_exact(&mut seq).unwrap();
-                        if seq[0] == b'[' {
-                            match seq[1] {
+                        let mut first = [0u8; 1];
+                        std::io::stdin().read_exact(&mut first).unwrap();
+                        if first[0] == b'[' {
+                            let mut second = [0u8; 1];
+                            std::io::stdin().read_exact(&mut second).unwrap();
+                            match second[0] {
                                 b'A' => return Key::Up,
                                 b'B' => return Key::Down,
                                 b'C' => return Key::Right,
@@ -192,7 +209,7 @@ mod platform {
                                 b'F' => return Key::End,
                                 b'H' => return Key::Home,
                                 b'0'..=b'9' => {
-                                    let mut params = vec![seq[1]];
+                                    let mut params = vec![second[0]];
                                     loop {
                                         let mut next = [0u8; 1];
                                         std::io::stdin().read_exact(&mut next).unwrap();
@@ -206,12 +223,28 @@ mod platform {
                                                     _ => continue,
                                                 }
                                             }
-                                            b'A'..=b'Z' | b'a'..=b'z' => continue,
+                                            b'A'..=b'Z' => {
+                                                match (params.as_slice(), next[0]) {
+                                                    (b"1;3", b'A') | (b"3", b'A') => return Key::AltUp,
+                                                    (b"1;3", b'B') | (b"3", b'B') => return Key::AltDown,
+                                                    (b"1;3", b'C') | (b"3", b'C') => return Key::AltRight,
+                                                    (b"1;3", b'D') | (b"3", b'D') => return Key::AltLeft,
+                                                    _ => continue,
+                                                }
+                                            }
+                                            b'a'..=b'z' => continue,
                                             _ => params.push(next[0]),
                                         }
                                     }
                                 }
                                 _    => continue,
+                            }
+                        } else {
+                            match first[0] {
+                                b'h' | b'H' => return Key::AltH,
+                                b'r' | b'R' => return Key::AltR,
+                                b'v' | b'V' => return Key::AltV,
+                                _ => continue,
                             }
                         }
                     } else {
@@ -222,6 +255,10 @@ mod platform {
                 _ => continue,
             }
         }
+    }
+
+    pub fn held_arrow_keys() -> super::HeldArrowKeys {
+        super::HeldArrowKeys::default()
     }
 }
 
@@ -256,6 +293,8 @@ mod platform {
     const KEY_EVENT_TYPE:  Word  = 0x0001;
     const LEFT_CTRL:       Dword = 0x0008;
     const RIGHT_CTRL:      Dword = 0x0004;
+    const LEFT_ALT:        Dword = 0x0002;
+    const RIGHT_ALT:       Dword = 0x0001;
 
     // INPUT_RECORD: WORD EventType (2) + WORD pad (2) + union Event (16 bytes)
     #[repr(C)]
@@ -393,11 +432,16 @@ mod platform {
                 let vk   = ke_vk(&rec.event);
                 let ch   = ke_char(&rec.event);
                 let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
+                let alt  = ke_ctrl(&rec.event) & (LEFT_ALT | RIGHT_ALT) != 0;
 
                 if ctrl && vk == 0x31 { return Key::Ctrl1; }
                 if ctrl && vk == 0x32 { return Key::Ctrl2; }
                 if ctrl && vk == 0x33 { return Key::Ctrl3; }
                 if ctrl && vk == 0x34 { return Key::Ctrl4; }
+                if alt && vk == 0x26 { return Key::AltUp; }
+                if alt && vk == 0x28 { return Key::AltDown; }
+                if alt && vk == 0x25 { return Key::AltLeft; }
+                if alt && vk == 0x27 { return Key::AltRight; }
                 if ctrl && vk == 0x2E { return Key::CtrlDelete; }
                 if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
                 if ctrl && vk == 0x44 { return Key::CtrlD; }
@@ -415,6 +459,9 @@ mod platform {
                 if ctrl && vk == 0x58 { return Key::CtrlX; }
                 if ctrl && vk == 0x5A { return Key::CtrlZ; }
                 if ctrl && vk == 0x54 { return Key::CtrlT; }
+                if alt && vk == 0x48 { return Key::AltH; }
+                if alt && vk == 0x52 { return Key::AltR; }
+                if alt && vk == 0x56 { return Key::AltV; }
 
                 // Para Ctrl+Enter usamos GetKeyState (estado real-time) porque
                 // dwControlKeyState pode não reportar Ctrl corretamente neste contexto.
@@ -443,6 +490,17 @@ mod platform {
                 if let Some(c) = char::from_u32(ch as u32) {
                     if c.is_ascii_graphic() || c == ' ' { return Key::Char(c); }
                 }
+            }
+        }
+    }
+
+    pub fn held_arrow_keys() -> super::HeldArrowKeys {
+        unsafe {
+            super::HeldArrowKeys {
+                up: GetKeyState(0x26) as u16 & 0x8000 != 0,
+                down: GetKeyState(0x28) as u16 & 0x8000 != 0,
+                left: GetKeyState(0x25) as u16 & 0x8000 != 0,
+                right: GetKeyState(0x27) as u16 & 0x8000 != 0,
             }
         }
     }

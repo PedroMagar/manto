@@ -89,6 +89,13 @@ impl Application {
         }
     }
 
+    pub fn saved_window(&self) -> Option<&Window> {
+        match &self.display {
+            DisplayMode::Maximized { saved, .. } => Some(saved),
+            _ => None,
+        }
+    }
+
     pub fn window_mut(&mut self) -> Option<&mut Window> {
         match &mut self.display {
             DisplayMode::Windowed(w)                  => Some(w),
