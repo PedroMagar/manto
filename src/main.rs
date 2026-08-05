@@ -415,6 +415,14 @@ fn main() {
                             pointer.y = last_size.1 - 2;
                         }
 
+                        Key::Char(':') => {
+                            pointer.x = CMD_INPUT_X;
+                            pointer.y = last_size.1 - 2;
+                            mode = Mode::Typing;
+                            panel_scroll = 0;
+                            mode_changed = true;
+                        }
+
                         Key::Char(' ') | Key::Enter => {
                             let sb_x   = last_size.0.saturating_sub(1);
                             let sb_top = 1u16;

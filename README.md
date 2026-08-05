@@ -52,6 +52,7 @@ The dock shell lives on the bottom bar. Press `Space` or `Enter` on the `.> ` ar
 
 - `Up`, `Down`, `Left`, `Right`: move the pointer.
 - `Home`: move the pointer to the dock shell input.
+- `:`: move the pointer to the dock shell input and enter typing mode.
 - `Space` or `Enter`: activate what is under the pointer.
 
 ### Dock Shell (`Typing`)
