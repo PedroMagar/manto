@@ -2,6 +2,7 @@ mod ansi;
 mod application;
 mod cmd;
 mod gui;
+mod history;
 mod os;
 mod pointer;
 mod terminal_backend;
@@ -12,6 +13,7 @@ use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_
           STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X, DESKTOP_AREA_LEN,
           TERMINAL_INPUT_PREFIX};
 use cmd::{CommandEntry, tick_all};
+use history::History;
 pub use application::{Application, TerminalState};
 use window::{Window, MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
@@ -137,25 +139,37 @@ fn push_shell_command(commands: &mut Vec<CommandEntry>, current_path: &mut Strin
         return;
     }
     let command_cwd = current_path.clone();
+    let first_word = trimmed.split_whitespace().next().unwrap_or(trimmed);
 
-    if trimmed == "cd" {
-        commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![command_cwd.clone()]));
-        return;
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("cd ")
-        .or_else(|| trimmed.strip_prefix("cd\t")) {
-        match resolve_virtual_path(current_path, rest) {
-            Ok(path) => {
-                commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![path.clone()]));
-                *current_path = path;
+    match first_word {
+        "cd" => {
+            let rest = trimmed.strip_prefix("cd ").or_else(|| trimmed.strip_prefix("cd\t"));
+            match rest {
+                Some("") => {
+                    commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![command_cwd.clone()]));
+                }
+                Some(rest) => {
+                    match resolve_virtual_path(current_path, rest) {
+                        Ok(path) => {
+                            commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![path.clone()]));
+                            *current_path = path;
+                        }
+                        Err(err) => commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![err])),
+                    }
+                }
+                None => {
+                    commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![command_cwd.clone()]));
+                }
             }
-            Err(err) => commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![err])),
         }
-        return;
+        "pwd" | "clear" | "help" | "exit" => {
+            let output = CommandEntry::run_builtin(trimmed, current_path);
+            commands.push(CommandEntry::completed(trimmed, &command_cwd, output));
+        }
+        _ => {
+            commands.push(CommandEntry::spawn(trimmed, &command_cwd));
+        }
     }
-
-    commands.push(CommandEntry::spawn(trimmed, &command_cwd));
 }
 
 fn history_up(commands: &[CommandEntry], input: &mut String, index: &mut Option<usize>, draft: &mut Option<String>) -> bool {
@@ -1207,12 +1221,22 @@ fn main() {
     let mut cmd_cursor       = 0usize;
     let mut history_index: Option<usize> = None;
     let mut history_draft: Option<String> = None;
-    let mut commands: Vec<CommandEntry> = Vec::new();
     let mut last_size     = os::size();
     let mut pointer       = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
     let mut applications = Vec::new();
     sync_terminal_window_metrics(&mut applications);
+
+    let history = History::new();
+    let loaded_history = history.load(1000);
+    let mut commands: Vec<CommandEntry> = if loaded_history.is_empty() {
+        Vec::new()
+    } else {
+        let cwd = current_path.clone();
+        loaded_history.iter().map(|line| {
+            CommandEntry::completed(line, &cwd, vec![line.clone()])
+        }).collect()
+    };
 
     let (preview, cursor) = compute_render_state(&mode, &applications, &pointer);
     let in_shell     = matches!(mode, Mode::Typing);
@@ -1324,6 +1348,28 @@ fn main() {
                         place_pointer_on_terminal_input(&mut pointer, &applications, app_idx, last_size.0, last_size.1);
                         mode = Mode::TerminalFocus { app_idx };
                         mode_changed = true;
+                    }
+                }
+
+                // Ctrl+C: kill running command in focused terminal
+                Key::CtrlC => {
+                    match &mode {
+                        Mode::TerminalFocus { app_idx } => {
+                            if let Some(t) = applications[*app_idx].terminal.as_mut() {
+                                for cmd in t.commands.iter_mut().rev() {
+                                    if cmd.is_running_external() {
+                                        cmd.kill();
+                                        t.commands.push(CommandEntry::completed(
+                                            "^C", &t.path, vec!["".to_string()],
+                                        ));
+                                        mode_changed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Mode::Typing => {}
+                        _ => {}
                     }
                 }
 
@@ -1620,6 +1666,7 @@ fn main() {
                                 let trimmed = cmd_input.trim().to_string();
                                 if !trimmed.is_empty() {
                                     push_shell_command(&mut commands, &mut current_path, &trimmed);
+                                    history.append(&trimmed);
                                     cmd_input.clear();
                                     cmd_cursor = 0;
                                     reset_history_navigation(&mut history_index, &mut history_draft);
@@ -1816,6 +1863,17 @@ fn main() {
                                     let trimmed = t.cmd_input.trim().to_string();
                                     if !trimmed.is_empty() {
                                         push_shell_command(&mut t.commands, &mut t.path, &trimmed);
+                                        history.append(&trimmed);
+                                        // Check if this was an exit builtin - close the terminal window
+                                        if let Some(last) = t.commands.last() {
+                                            if last.is_exit() {
+                                                applications.remove(idx);
+                                                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, current_desktop, last_size.1));
+                                                mode = Mode::Normal;
+                                                mode_changed = true;
+                                                return;
+                                            }
+                                        }
                                         t.cmd_input.clear();
                                         t.input_cursor = 0;
                                         reset_history_navigation(&mut t.history_index, &mut t.history_draft);

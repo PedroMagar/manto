@@ -123,8 +123,25 @@ mod platform {
     use super::Key;
     use std::io::Read;
     use std::mem::MaybeUninit;
+    use std::time::{Duration, Instant};
 
     static mut ORIG_TERMIOS: Option<libc::termios> = None;
+
+    struct HeldState {
+        up: bool,
+        down: bool,
+        left: bool,
+        right: bool,
+    }
+
+    impl Default for HeldState {
+        fn default() -> Self {
+            Self { up: false, down: false, left: false, right: false }
+        }
+    }
+
+    static mut HELD_ARROWS: HeldState = HeldState::default();
+    static mut LAST_ARROW_TIME: Option<Instant> = None;
 
     pub fn enable_raw_mode() {
         unsafe {
@@ -202,10 +219,22 @@ mod platform {
                             let mut second = [0u8; 1];
                             std::io::stdin().read_exact(&mut second).unwrap();
                             match second[0] {
-                                b'A' => return Key::Up,
-                                b'B' => return Key::Down,
-                                b'C' => return Key::Right,
-                                b'D' => return Key::Left,
+                                b'A' => {
+                                    unsafe { HELD_ARROWS.up = true; LAST_ARROW_TIME = Some(Instant::now()); }
+                                    return Key::Up;
+                                }
+                                b'B' => {
+                                    unsafe { HELD_ARROWS.down = true; LAST_ARROW_TIME = Some(Instant::now()); }
+                                    return Key::Down;
+                                }
+                                b'C' => {
+                                    unsafe { HELD_ARROWS.right = true; LAST_ARROW_TIME = Some(Instant::now()); }
+                                    return Key::Right;
+                                }
+                                b'D' => {
+                                    unsafe { HELD_ARROWS.left = true; LAST_ARROW_TIME = Some(Instant::now()); }
+                                    return Key::Left;
+                                }
                                 b'F' => return Key::End,
                                 b'H' => return Key::Home,
                                 b'0'..=b'9' => {
@@ -258,7 +287,21 @@ mod platform {
     }
 
     pub fn held_arrow_keys() -> super::HeldArrowKeys {
-        super::HeldArrowKeys::default()
+        unsafe {
+            let now = Instant::now();
+            if let Some(last) = LAST_ARROW_TIME {
+                if now.duration_since(last) > Duration::from_millis(500) {
+                    HELD_ARROWS = HeldState::default();
+                    LAST_ARROW_TIME = None;
+                }
+            }
+            super::HeldArrowKeys {
+                up: HELD_ARROWS.up,
+                down: HELD_ARROWS.down,
+                left: HELD_ARROWS.left,
+                right: HELD_ARROWS.right,
+            }
+        }
     }
 }
 

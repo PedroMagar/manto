@@ -50,6 +50,11 @@ impl PlatformCommand {
     pub fn try_wait(&mut self) -> Option<i32> {
         self.child.try_wait().ok().flatten().map(|status| status.code().unwrap_or_default())
     }
+
+    pub fn kill(&mut self) -> bool {
+        let _ = self.child.kill();
+        true
+    }
 }
 
 impl Drop for PlatformCommand {

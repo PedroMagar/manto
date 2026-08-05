@@ -44,6 +44,11 @@ impl CommandSession {
         let closed = self.closed_streams >= 2 && exit_code.is_some();
         CommandPoll { lines, exit_code, closed }
     }
+
+    /// Kill the running process. Returns true if the process was killed.
+    pub fn kill(&mut self) -> bool {
+        self.platform.kill()
+    }
 }
 
 #[cfg(windows)]
