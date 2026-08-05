@@ -85,9 +85,16 @@ mod tests {
 
     #[test]
     fn load_empty_returns_none() {
-        let history = History::new();
+        let tmp_dir = std::env::temp_dir().join(format!("manto-empty-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let _ = fs::create_dir_all(&tmp_dir);
+
+        let history_file = tmp_dir.join("history");
+        let history = History { path: history_file };
         let loaded = history.load(100);
         assert!(loaded.is_empty());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]
