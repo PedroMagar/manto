@@ -66,6 +66,14 @@ fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
     }
 }
 
+/// Há dados lidos imediatamente no fd (poll não-bloqueante)?
+fn unix_fd_has_data(fd: RawFd) -> bool {
+    unsafe {
+        let mut fds = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        libc::poll(&mut fds, 1, 0) > 0 && (fds.revents & libc::POLLIN) != 0
+    }
+}
+
 // ── Platform state ────────────────────────────────────────────────────────────
 
 pub struct PlatformCommand {
@@ -250,6 +258,15 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
                 if !trimmed.is_empty() {
                     let _ = tx.send(TerminalUpdate::Line(trimmed));
                 }
+            }
+            // Saída parcial estabilizada (ex.: prompt ">>> "): quando não há
+            // mais dados iminentes no PTY, emite agora em vez de esperar '\n'.
+            if !residue.trim().is_empty() && !unix_fd_has_data(master_fd) {
+                let part = residue.trim_end().to_string();
+                if !part.is_empty() {
+                    let _ = tx.send(TerminalUpdate::Line(part));
+                }
+                residue.clear();
             }
         }
         if !residue.trim().is_empty() {

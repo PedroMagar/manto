@@ -265,19 +265,21 @@ pub fn draw_terminal_content(
 
 /// Desenha a saída bruta de uma sessão de shell persistente.
 ///
-/// Quando `TerminalState.shell_session` está ativo, a janela mostra o fluxo de
-/// linhas do shell, com scroll vertical e seguindo o fim por padrão.
-///
 /// Layout interno (de cima para baixo):
 ///   rows 1 .. h-4  : saída do shell (scroll; coluna à direita = scrollbar vertical)
 ///   row  h-3       : ├─ path ────────────────────────────────────────────────┤
 ///   row  h-2       : │ .> (linha de input; conteúdo do terminal focalizado)    │
 ///   row  h-1       : (borda inferior, renderizada pelo chrome)
+///
+/// Quando `repl` é Some (aplicativo/REPL em modo de tela, ex.: Python ">>>"),
+/// a janela vira "terminal cheio": sem separador de path e com o prompt do
+/// REPL na linha de input no lugar da barra " .> ".
 pub fn draw_shell_content(
     out:          &mut impl Write,
     win:          &Window,
     lines:        &[String],
     panel_scroll: usize,
+    repl:         Option<&str>,
 ) {
     if win.height < 5 { return; }
 
@@ -285,7 +287,8 @@ pub fn draw_shell_content(
     let ty      = win.position_y;
     let inner_w = (win.width - 2) as usize;
 
-    let content_h = win.height.saturating_sub(4) as usize;
+    // No modo REPL ganhamos a linha do path como área de saída.
+    let content_h = win.height.saturating_sub(if repl.is_some() { 3 } else { 4 }) as usize;
     if content_h == 0 { return; }
 
     let has_vscroll = lines.len() > content_h;
@@ -336,17 +339,20 @@ pub fn draw_shell_content(
         }
     }
 
-    // ── Separador de path ─────────────────────────────────────────────────────
-    let path_y = ty + win.height - 3;
-    ansi::move_to(out, lx, path_y);
-    write!(out, "├{:─<1$}┤", "", inner_w).unwrap();
+    // ── Sem modo REPL: separador de path ─────────────────────────────────────
+    if repl.is_none() {
+        let path_y = ty + win.height - 3;
+        ansi::move_to(out, lx, path_y);
+        write!(out, "├{:─<1$}┤", "", inner_w).unwrap();
+    }
 
     // ── Linha de input (prefixo; o conteúdo do terminal focalizado é
     //    desenhado pelo loop principal por cima deste prefixo) ────────────────
     let input_y = ty + win.height - 2;
-    let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
+    let prefix = repl.unwrap_or(TERMINAL_INPUT_PREFIX);
+    let prefix_len = prefix.chars().count();
     ansi::move_to(out, lx + 1, input_y);
-    write!(out, "{}{:<width$}", TERMINAL_INPUT_PREFIX, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
+    write!(out, "{}{:<width$}", prefix, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
 }
 
 // ── Painel de comandos ────────────────────────────────────────────────────────

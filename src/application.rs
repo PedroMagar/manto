@@ -20,9 +20,19 @@ pub struct TerminalState {
     pub path:         String,
     pub history_index: Option<usize>,
     pub history_draft: Option<String>,
+    /// Prompt do REPL/aplicativo interativo em execução (ex.: ">>>" do Python).
+    /// Quando Some, a janela oculta a barra " .> " e usa este prompt.
+    pub repl_prompt:  Option<String>,
 }
 
 impl TerminalState {
+    /// Detecta um prompt de REPL no fluxo (ex.: ">>>" do Python, "sqlite>",
+    /// ">", etc.) para não exibi-lo como uma linha solta.
+    fn looks_like_repl_prompt(line: &str) -> bool {
+        let t = line.trim();
+        !t.is_empty() && t.chars().count() <= 12 && t.ends_with('>')
+    }
+
     pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
         Self {
             shell_session: None,
@@ -34,6 +44,7 @@ impl TerminalState {
             panel_scroll: 0,
             history_index: None,
             history_draft: None,
+            repl_prompt: None,
         }
     }
 
@@ -72,6 +83,7 @@ impl TerminalState {
             panel_scroll: 0,
             history_index: None,
             history_draft: None,
+            repl_prompt: None,
         })
     }
 
@@ -95,11 +107,29 @@ impl TerminalState {
         if let Some(ref mut session) = self.shell_session {
             let poll = session.poll();
             for line in poll.lines {
-                self.push_shell_line(line);
-                changed = true;
+                changed |= self.ingest_output_line(line);
+            }
+            if poll.closed {
+                self.repl_prompt = None;
             }
         }
         changed
+    }
+
+    /// Ingere uma linha da saída da sessão. Prompts de REPL são suprimidos do
+    /// display e guardados como prefixo; demais linhas vão para `shell_lines`.
+    pub(crate) fn ingest_output_line(&mut self, line: String) -> bool {
+        if Self::looks_like_repl_prompt(&line) {
+            self.repl_prompt = Some(line.trim().to_string());
+        } else {
+            self.push_shell_line(line);
+        }
+        true
+    }
+
+    /// Encerra o modo REPL (essencialmente quando o usuário envia EOF).
+    pub fn clear_repl(&mut self) {
+        self.repl_prompt = None;
     }
 
     /// Adiciona uma linha ao fluxo visual do shell, limitando o histórico.

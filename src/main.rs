@@ -47,6 +47,13 @@ fn interactive_command(cmd: &str) -> String {
     }
 }
 
+/// Comandos que encerram um REPL (exit/quit e variantes). Usados para detectar
+/// que o aplicativo/filho saiu e devolver a janela ao estado normal.
+fn is_repl_exit(cmd: &str) -> bool {
+    let lower = cmd.trim().to_ascii_lowercase();
+    lower.starts_with("exit") || lower.starts_with("quit") || matches!(lower.as_str(), "\\q" | ":q")
+}
+
 fn render<W: std::io::Write>(
     out: &mut W,
     applications: &[Application],
@@ -74,7 +81,7 @@ fn render<W: std::io::Write>(
                 win.draw(out, &app.title);
                 if let Some(term) = app.terminal.as_ref() {
                     if term.shell_session.is_some() {
-                        draw_shell_content(out, win, &term.shell_lines, term.panel_scroll);
+                        draw_shell_content(out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
                     } else {
                         draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
                     }
@@ -139,13 +146,17 @@ fn render<W: std::io::Write>(
             .and_then(|a| a.window())
         {
             if win.height >= 5 {
-                let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
+                // Prefixo: barra " .> " ou o prompt do REPL ativo (ex.: ">>>").
+                let repl = applications.get(term_idx)
+                    .and_then(|a| a.terminal.as_ref())
+                    .and_then(|t| t.repl_prompt.clone());
+                let prefix = repl.as_deref().unwrap_or(TERMINAL_INPUT_PREFIX);
+                let prefix_len = prefix.chars().count();
                 let inner_w    = (win.width - 2) as usize;
                 let max_len    = inner_w.saturating_sub(prefix_len);
                 let (display, cursor_col) = input::input_view(term_input, cursor_pos, max_len);
                 let cursor_x   = win.position_x + 1 + prefix_len as u16;
-                let has_hscroll = win.content_w as usize > win.width.saturating_sub(2) as usize;
-                let cursor_y   = win.position_y + win.height - if has_hscroll { 3 } else { 2 };
+                let cursor_y   = win.position_y + win.height - 2;
                 ansi::move_to(out, cursor_x, cursor_y);
                 write!(out, "{:<width$}", display, width = max_len).unwrap();
                 ansi::move_to(out, cursor_x + cursor_col as u16, cursor_y);
@@ -940,6 +951,11 @@ fn main() {
                                                         // forma interativa exige `-i`; reescrevemos transparentemente.
                                                         // Envia com final de linha `\r\n` (Python e muitos programas
                                                         // exigem `\n`; só `\r` não os faz processar a linha).
+                                                        // Comandos de saída do REPL (exit/quit) encerram só o filho,
+                                                        // não a sessão — limpa o modo REPL para a janela voltar ao normal.
+                                                        if t.repl_prompt.is_some() && is_repl_exit(&cmd) {
+                                                            t.clear_repl();
+                                                        }
                                                         let line = format!("{}\r\n", interactive_command(&cmd));
                                                         if let Some(ref mut session) = t.shell_session {
                                                             session.write(line.as_bytes());
@@ -954,6 +970,7 @@ fn main() {
                                             }
                                             Key::CtrlD => {
                                                 // EOF/EOF-ish para tools que usam Ctrl+D (python 3, shells).
+                                                t.clear_repl();
                                                 if let Some(ref mut session) = t.shell_session {
                                                     session.write(&[4]);
                                                 }
@@ -962,6 +979,7 @@ fn main() {
                                             Key::CtrlZ => {
                                                 // EOF no Windows (python2 usa Ctrl+Z+Enter; tambem Ctrl+Z
                                                 // suspende job em shells unix). Encaminha o byte cru.
+                                                t.clear_repl();
                                                 if let Some(ref mut session) = t.shell_session {
                                                     session.write(&[26]);
                                                 }
@@ -1428,6 +1446,17 @@ mod tests {
     }
 
     #[test]
+    fn repl_exit_detection_clears_mode() {
+        // exit/quit encerram o REPL; comandos comuns não.
+        for e in ["exit", "exit()", "quit", "quit()", "\\q", ":q"] {
+            assert!(is_repl_exit(e), "{e} deveria sair do REPL");
+        }
+        for e in ["dir", "print('x')", "q", "1+1"] {
+            assert!(!is_repl_exit(e), "{e} não deveria sair do REPL");
+        }
+    }
+
+    #[test]
     fn python_opens_through_session() {
         use std::thread;
         use std::time::{Duration, Instant};
@@ -1480,6 +1509,26 @@ mod tests {
             thread::sleep(Duration::from_millis(40));
         }
         assert!(saw_mark, "python não executou a linha enviada");
+    }
+
+    #[test]
+    fn repl_prompt_is_suppressed_and_used_as_prefix() {
+        let mut t = TerminalState::new(".".to_string(), Vec::new());
+
+        // Linha ">>>" (prompt solto) não vai para o display; vira prefixo.
+        t.ingest_output_line(">>>".to_string());
+        assert_eq!(t.repl_prompt.as_deref(), Some(">>>"));
+        assert!(t.shell_lines.is_empty(), "prompt vazou: {:?}", t.shell_lines);
+
+        // Resultado de REPL entra normalmente e mantém o modo.
+        t.ingest_output_line("42".to_string());
+        assert!(t.shell_lines.iter().any(|l| l == "42"));
+        assert_eq!(t.repl_prompt.as_deref(), Some(">>>"));
+
+        // clear_repl encerra o modo.
+        t.clear_repl();
+        assert_eq!(t.repl_prompt, None);
+        assert!(t.repl_prompt.is_none());
     }
 
     #[test]

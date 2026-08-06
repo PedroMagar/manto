@@ -87,6 +87,10 @@ unsafe extern "system" {
         value: *mut u8, size: usize, prev: *mut u8, ret_size: *mut u8,
     ) -> Bool;
     fn DeleteProcThreadAttributeList(attr: *mut u8);
+    fn PeekNamedPipe(
+        h: Handle, buf: *mut u8, n: Dword,
+        read: *mut Dword, avail: *mut Dword, left: *mut Dword,
+    ) -> Bool;
 }
 
 // ── ConPTY backend ────────────────────────────────────────────────────────────
@@ -375,34 +379,38 @@ fn drain_lines(residue: &mut String, tx: &Sender<TerminalUpdate>) -> bool {
     drained
 }
 
+/// Há bytes já disponíveis no pipe sem bloquear? (para decidir se um partial
+/// é um prompt estabilizado e merece ser emitido já).
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn pipe_has_data(h: Handle) -> bool {
+    let mut avail: Dword = 0;
+    PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) != 0
+        && avail > 0
+}
+
 /// Lê um stream de bytes de forma lossy (aceita codepages OEM não-UTF-8 sem
 /// derrubar a thread) e emite `TerminalUpdate::Line` por linha quebrada.
 ///
-/// Saída parcial sem newline (ex.: prompt `>>> ` de REPLs) é emitida após um
-/// curto intervalo, para não ficar presa até o próximo newline.
-fn read_lossy_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
+/// Saída parcial sem newline (ex.: prompt `>>> ` de REPLs) é emitida assim que
+/// o pipe fica momentaneamente vazio (não há mais dados iminentes), evitando
+/// que fique presa esperando um `\n` que não virá.
+fn read_lossy_stream<R: Read>(mut stream: R, raw: Handle, tx: &Sender<TerminalUpdate>) {
     let mut buf = [0u8; 4096];
     let mut residue = String::new();
-    let mut last_newline = std::time::Instant::now();
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 residue.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if drain_lines(&mut residue, tx) {
-                    last_newline = std::time::Instant::now();
-                }
-                // Saída parcial (prompt/progresso sem newline) — emite após
-                // debounce para não fragmentar linhas normais.
-                if !residue.is_empty()
-                    && last_newline.elapsed() >= std::time::Duration::from_millis(50)
-                {
+                drain_lines(&mut residue, tx);
+                // Saída parcial estabilizada: sem mais dados no pipe, é um
+                // prompt/progresso — emite agora.
+                if !residue.trim().is_empty() && !unsafe { pipe_has_data(raw) } {
                     let part = residue.trim_end().to_string();
                     if !part.is_empty() {
                         let _ = tx.send(TerminalUpdate::Line(part));
                     }
                     residue.clear();
-                    last_newline = std::time::Instant::now();
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -510,6 +518,10 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
     let stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+    use std::os::windows::io::AsRawHandle;
+    // usize é Send; o Handle bruto é recriado dentro das threads.
+    let stdout_raw = stdout.as_raw_handle() as usize;
+    let stderr_raw = stderr.as_raw_handle() as usize;
 
     // Input forwarding thread.
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -525,14 +537,14 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
     // stdout reader (leitura lossy: saída pode vir em codepage OEM não-UTF-8).
     let tx_out = tx.clone();
     thread::spawn(move || {
-        read_lossy_stream(stdout, &tx_out);
+        read_lossy_stream(stdout, stdout_raw as Handle, &tx_out);
         let _ = tx_out.send(TerminalUpdate::Closed);
     });
 
     // stderr reader (leitura lossy).
     let tx_err = tx.clone();
     thread::spawn(move || {
-        read_lossy_stream(stderr, &tx_err);
+        read_lossy_stream(stderr, stderr_raw as Handle, &tx_err);
         let _ = tx_err.send(TerminalUpdate::Closed);
     });
 
@@ -653,6 +665,48 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_lossy_stream_flushes_partial_no_newline() {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        use std::time::{Duration, Instant};
+
+        // Filho escreve "TAGABC" sem newline, dorme, depois "X\n".
+        let mut child = Command::new("python")
+            .args(["-c", "import sys,time; sys.stdout.write('TAGABC'); sys.stdout.flush(); time.sleep(1); sys.stdout.write('X\\n')"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(0x08000000)
+            .spawn()
+            .expect("spawn python");
+        let stdout = child.stdout.take().unwrap();
+        let raw = stdout.as_raw_handle() as usize;
+        let (tx, rx) = std::sync::mpsc::channel::<TerminalUpdate>();
+        thread::spawn(move || {
+            read_lossy_stream(stdout, raw as Handle, &tx);
+            let _ = tx.send(TerminalUpdate::Closed);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut lines: Vec<String> = Vec::new();
+        while Instant::now() < deadline {
+            while let Ok(u) = rx.try_recv() {
+                if let TerminalUpdate::Line(l) = u { lines.push(l); }
+            }
+            if lines.iter().any(|l| l.contains('X')) { break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // O partial "TAGABC" (sem newline) deve ter sido emitido sozinho,
+        // antes do "X" — não pode ficar preso nem se fundir a "TAGABCX".
+        assert!(
+            lines.iter().any(|l| l.contains("TAGABC") && !l.contains('X')),
+            "partial não liberado/fundido: {lines:?}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn conpty_probe_does_not_poison_following_pipe() {
