@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::ansi;
+use super::ansi;
 
 pub struct Pointer {
     pub x: u16,
@@ -33,9 +33,8 @@ impl Pointer {
         self.x = (self.x + 1).min(max.saturating_sub(1));
     }
 
-    /// Desenha o cursor.
-    /// `interaction`: None = cursor normal (░)
-    ///                Some(c) = cursor interativo — mostra `c` em reverse video
+    /// Draw the cursor. `interaction`: None = normal cursor (░);
+    /// Some(c) = interactive cursor, showing `c` in reverse video.
     pub fn draw(&self, out: &mut impl Write, interaction: Option<char>) {
         ansi::move_to(out, self.x, self.y);
         match interaction {

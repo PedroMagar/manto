@@ -66,7 +66,7 @@ fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
     }
 }
 
-/// Há dados lidos imediatamente no fd (poll não-bloqueante)?
+/// Is there data available to read on the fd right now (non-blocking poll)?
 fn unix_fd_has_data(fd: RawFd) -> bool {
     unsafe {
         let mut fds = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
@@ -259,8 +259,8 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
                     let _ = tx.send(TerminalUpdate::Line(trimmed));
                 }
             }
-            // Saída parcial estabilizada (ex.: prompt ">>> "): quando não há
-            // mais dados iminentes no PTY, emite agora em vez de esperar '\n'.
+            // Stabilized partial output (e.g. a ">>> " prompt): when no more
+            // data is imminent on the PTY, emit now instead of waiting for '\n'.
             if !residue.trim().is_empty() && !unix_fd_has_data(master_fd) {
                 let part = residue.trim_end().to_string();
                 if !part.is_empty() {

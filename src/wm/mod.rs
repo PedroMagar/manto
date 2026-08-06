@@ -1,9 +1,9 @@
 use std::path::Path;
-use crate::application::Application;
+use crate::app::Application;
 use crate::cmd::CommandEntry;
-use crate::gui::TERMINAL_INPUT_PREFIX;
-use crate::window::{Window, MIN_W, MIN_H};
-use crate::pointer::Pointer;
+use crate::ui::TERMINAL_INPUT_PREFIX;
+use crate::ui::window::{Window, MIN_W, MIN_H};
+use crate::ui::pointer::Pointer;
 use crate::os::Key;
 
 #[derive(Debug)]
@@ -140,7 +140,7 @@ pub fn interact_terminal_horizontal_scroll(app: &mut Application, x: u16, y: u16
         return false;
     };
     if term.shell_session.is_some() {
-        return false; // sessões não têm scroll horizontal
+        return false; // sessions have no horizontal scroll
     }
     let Some(win) = app.window() else {
         return false;
@@ -153,7 +153,7 @@ pub fn interact_terminal_horizontal_scroll(app: &mut Application, x: u16, y: u16
     }
 
     let inner_w = win.width.saturating_sub(2) as usize;
-    let max_scroll = crate::gui::terminal_content_width(&term.path, &term.commands).saturating_sub(inner_w) as u16;
+    let max_scroll = crate::ui::terminal_content_width(&term.path, &term.commands).saturating_sub(inner_w) as u16;
     if max_scroll == 0 {
         return false;
     }
@@ -171,8 +171,8 @@ pub fn interact_terminal_horizontal_scroll(app: &mut Application, x: u16, y: u16
     false
 }
 
-/// Interage com a scrollbar vertical de uma sessão de shell: mover o ponteiro
-/// sobre a coluna da scrollbar posiciona o `panel_scroll` proporcionalmente.
+/// Interact with a shell session's vertical scrollbar: moving the pointer
+/// over the scrollbar column positions `panel_scroll` proportionally.
 pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) -> bool {
     let Some(term) = app.terminal.as_ref() else {
         return false;
@@ -208,9 +208,9 @@ pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) 
     }
     let max_scroll = lines_len - content_h;
     let track = content_h;
-    // Instagram na faixa: topo (idx 0) = início do conteúdo (panel_scroll=max),
-    // fundo (idx track-1) = mais recente (panel_scroll=0). O `panel_scroll` é
-    // "quanto subiu do fim", então invertemos o índice.
+    // Mapping along the track: top (idx 0) = start of the content
+    // (panel_scroll=max), bottom (idx track-1) = newest (panel_scroll=0).
+    // `panel_scroll` is "how far up from the end", so the index is inverted.
     let idx = (y - top) as usize;
     let down = ((idx + 1) * max_scroll / track).min(max_scroll);
     let target = max_scroll.saturating_sub(down);
@@ -230,13 +230,13 @@ pub fn sync_terminal_window_metrics(applications: &mut [Application]) {
             continue;
         };
         let is_session = term.shell_session.is_some();
-        let content_w = crate::gui::terminal_content_width(&term.path, &term.commands);
+        let content_w = crate::ui::terminal_content_width(&term.path, &term.commands);
 
         if let Some(win) = app.window_mut() {
             if is_session {
-                // Sessões de shell não usam scroll horizontal; o scroll vertical
-                // é intra-janela (draw_shell_content). content_w = 0 desativa o
-                // scrollbar horizontal do chrome.
+                // Shell sessions do not use horizontal scroll; vertical scroll
+                // is intra-window (draw_shell_content). content_w = 0 disables
+                // the chrome horizontal scrollbar.
                 win.content_w = 0;
                 win.content_h = 0;
                 win.scroll_x = 0;
@@ -251,7 +251,7 @@ pub fn sync_terminal_window_metrics(applications: &mut [Application]) {
     }
 }
 
-/// Retorna o índice da janela visualmente no topo na posição (x, y).
+/// Return the index of the visually topmost window at (x, y).
 pub fn topmost_window_at(applications: &[Application], current_desktop: usize, x: u16, y: u16) -> Option<usize> {
     applications.iter().rposition(|app| {
         app.on_desktop(current_desktop) && app.window().map_or(false, |win| {
@@ -263,7 +263,7 @@ pub fn topmost_window_at(applications: &[Application], current_desktop: usize, x
     })
 }
 
-/// Calcula (app_idx, tab_y, tab_height) para cada app minimizado visível.
+/// Compute (app_idx, tab_y, tab_height) for each visible minimized app.
 pub fn tab_layout(applications: &[Application], current_desktop: usize, screen_h: u16, scroll: usize) -> Vec<(usize, u16, u16)> {
     let usable_h = screen_h.saturating_sub(4);
     let minimized: Vec<usize> = applications.iter().enumerate()
@@ -285,7 +285,7 @@ pub fn tab_layout(applications: &[Application], current_desktop: usize, screen_h
 }
 
 
-/// Scroll máximo possível para as abas.
+/// Maximum possible scroll for the tabs.
 pub fn max_tab_scroll(applications: &[Application], current_desktop: usize, screen_h: u16) -> usize {
     let usable_h = screen_h.saturating_sub(4);
     let total = applications.iter().filter(|a| a.on_desktop(current_desktop) && a.is_minimized()).count();
@@ -758,4 +758,153 @@ pub fn apply_resize_edit(
 
     pointer.clamp_to_bounds(screen_w, screen_h);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Application;
+    use crate::os::{self, Key};
+    use crate::ui::pointer::Pointer;
+    use crate::ui::window::Window;
+
+    #[test]
+    fn ctrl_arrow_combines_into_quadrant() {
+        assert!(matches!(
+            resolve_snap_region(&Key::AltLeft, os::HeldArrowKeys { up: true, ..Default::default() }),
+            Some(SnapRegion::TopLeft)
+        ));
+        assert!(matches!(
+            resolve_snap_region(&Key::AltUp, os::HeldArrowKeys { left: true, ..Default::default() }),
+            Some(SnapRegion::TopLeft)
+        ));
+    }
+
+    #[test]
+    fn ctrl_arrow_same_axis_stays_half_snap() {
+        assert!(matches!(
+            resolve_snap_region(&Key::AltUp, os::HeldArrowKeys::default()),
+            Some(SnapRegion::Top)
+        ));
+        assert!(matches!(
+            resolve_snap_region(&Key::AltDown, os::HeldArrowKeys::default()),
+            Some(SnapRegion::Bottom)
+        ));
+    }
+
+    #[test]
+    fn alt_r_enters_resize_mode_on_active_window() {
+        let applications = vec![
+            Application::windowed("Test", Window::new(10, 5, 20, 8, 0)),
+        ];
+        let mut mode = Mode::Normal;
+        let mut pointer = Pointer::new(1, 1);
+
+        assert!(enter_active_resize_mode(&applications, &mut mode, 1, &mut pointer, 120, 40));
+        assert!(matches!(mode, Mode::Resizing { app_idx: 0, .. }));
+        assert_eq!(pointer.x, 29);
+        assert_eq!(pointer.y, 12);
+    }
+
+    #[test]
+    fn apply_resize_edit_updates_width_preview() {
+        let win = Window::new(10, 5, 20, 8, 0);
+        let mut pointer = Pointer::new(29, 12);
+        let edit = ResizeEditState {
+            axis: ResizeAxis::Width,
+            op: Some(ResizeOp::Add),
+            value: "5".to_string(),
+        };
+
+        assert!(apply_resize_edit(&win, &mut pointer, 120, 40, &edit));
+        assert_eq!(pointer.x, 34);
+        assert_eq!(pointer.y, 12);
+    }
+
+    #[test]
+    fn apply_resize_edit_sets_height_preview() {
+        let win = Window::new(10, 5, 20, 8, 0);
+        let mut pointer = Pointer::new(29, 12);
+        let edit = ResizeEditState {
+            axis: ResizeAxis::Height,
+            op: Some(ResizeOp::Set),
+            value: "4".to_string(),
+        };
+
+        assert!(apply_resize_edit(&win, &mut pointer, 120, 40, &edit));
+        assert_eq!(pointer.x, 29);
+        assert_eq!(pointer.y, 8);
+    }
+
+    #[test]
+    fn top_snap_toggles_with_maximize_on_repeat() {
+        let mut applications = vec![
+            Application::windowed("Test", Window::new(10, 5, 20, 8, 0)),
+        ];
+        let mut mode = Mode::Normal;
+        let top = snap_rect(120, 40, SnapRegion::Top);
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        let win = applications[0].window().unwrap();
+        assert!(window_matches_geometry(win, top.0, top.1, top.2, top.3));
+        assert!(!applications[0].is_maximized());
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        assert!(applications[0].is_maximized());
+
+        assert!(snap_active_window(&mut applications, &mut mode, 1, 120, 40, SnapRegion::Top));
+        let win = applications[0].window().unwrap();
+        assert!(window_matches_geometry(win, top.0, top.1, top.2, top.3));
+        assert!(!applications[0].is_maximized());
+    }
+
+    #[test]
+    fn split_vertical_creates_new_terminal_on_right() {
+        let mut applications = vec![
+            Application::terminal_window("Terminal 1", Window::new(10, 5, 20, 8, 0), "D:\\tmp".to_string(), Vec::new()),
+        ];
+        let mut mode = Mode::TerminalFocus { app_idx: 0 };
+        let mut next_terminal_id = 2;
+
+        let new_idx = split_active_terminal_window(
+            &mut applications,
+            &mut mode,
+            &mut next_terminal_id,
+            1,
+            SplitDirection::Vertical,
+        ).unwrap();
+
+        assert_eq!(applications.len(), 2);
+        assert_eq!(new_idx, 1);
+        let left = applications[0].window().unwrap();
+        let right = applications[1].window().unwrap();
+        assert_eq!((left.position_x, left.position_y, left.width, left.height), (10, 5, 10, 8));
+        assert_eq!((right.position_x, right.position_y, right.width, right.height), (20, 5, 10, 8));
+        assert_eq!(applications[1].terminal.as_ref().unwrap().path, "D:\\tmp");
+    }
+
+    #[test]
+    fn split_horizontal_creates_new_terminal_below() {
+        let mut applications = vec![
+            Application::terminal_window("Terminal 1", Window::new(10, 5, 20, 8, 0), "D:\\tmp".to_string(), Vec::new()),
+        ];
+        let mut mode = Mode::TerminalFocus { app_idx: 0 };
+        let mut next_terminal_id = 2;
+
+        let new_idx = split_active_terminal_window(
+            &mut applications,
+            &mut mode,
+            &mut next_terminal_id,
+            1,
+            SplitDirection::Horizontal,
+        ).unwrap();
+
+        assert_eq!(applications.len(), 2);
+        assert_eq!(new_idx, 1);
+        let top = applications[0].window().unwrap();
+        let bottom = applications[1].window().unwrap();
+        assert_eq!((top.position_x, top.position_y, top.width, top.height), (10, 5, 20, 4));
+        assert_eq!((bottom.position_x, bottom.position_y, bottom.width, bottom.height), (10, 9, 20, 4));
+        assert_eq!(applications[1].terminal.as_ref().unwrap().path, "D:\\tmp");
+    }
 }

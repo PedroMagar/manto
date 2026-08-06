@@ -107,7 +107,7 @@ impl CommandSession {
         self.closed_streams >= 1
     }
 
-    /// Rótulo do backend usado (diagnóstico/testes).
+    /// Label of the backend in use (diagnostics/tests).
     #[cfg(test)]
     pub fn kind_label(&self) -> &'static str {
         self.platform.kind_label()

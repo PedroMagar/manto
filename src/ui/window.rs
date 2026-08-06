@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::ansi;
+use super::ansi;
 
 pub const MIN_W: u16 = 5;
 pub const MIN_H: u16 = 3;
@@ -15,7 +15,7 @@ pub struct Window {
     pub closable: bool,
     pub draggable: bool,
     pub resizable: bool,
-    /// Resolução interna do conteúdo. 0 = igual à área visível (sem scroll).
+    /// Internal content resolution. 0 = same as the visible area (no scroll).
     pub content_w: u16,
     pub content_h: u16,
     pub scroll_x: u16,
@@ -32,14 +32,14 @@ impl Window {
         }
     }
 
-    /// Define a resolução interna do conteúdo, habilitando scrollbars quando necessário.
+    /// Set the internal content resolution, enabling scrollbars when needed.
     pub fn with_content(mut self, content_w: u16, content_h: u16) -> Self {
         self.content_w = content_w;
         self.content_h = content_h;
         self
     }
 
-    /// Remove os botões de chrome (minimizar / fechar / arrastar / redimensionar).
+    /// Remove the chrome buttons (minimize / close / drag / resize).
     pub fn without_chrome(mut self) -> Self {
         self.minimizable = false;
         self.closable = false;
@@ -53,8 +53,8 @@ impl Window {
     fn has_vscroll(&self) -> bool { self.content_h > 0 && self.content_h as usize > self.visible_h() }
     fn has_hscroll(&self) -> bool { self.content_w > 0 && self.content_w as usize > self.visible_w() }
 
-    /// Calcula (thumb_pos, thumb_len) para um scrollbar de janela.
-    /// `track` = tamanho da trilha = tamanho visível.
+    /// Compute (thumb_pos, thumb_len) for a window scrollbar.
+    /// `track` = track size = visible size.
     fn scroll_thumb(track: usize, total: usize, scroll: usize) -> (usize, usize) {
         let thumb_len = (((track as f32 / total as f32) * track as f32).max(1.0) as usize)
             .min(track);
@@ -64,7 +64,7 @@ impl Window {
         (thumb_pos, thumb_len)
     }
 
-    /// Retorna o char de scrollbar (░ ou █) para a posição `i` dentro da trilha.
+    /// Return the scrollbar character (░ or █) for position `i` within the track.
     fn scroll_char(thumb_pos: usize, thumb_len: usize, i: usize) -> char {
         if i >= thumb_pos && i < thumb_pos + thumb_len { '█' } else { '░' }
     }
@@ -77,33 +77,33 @@ impl Window {
         let vw = self.visible_w();
         let vh = self.visible_h();
 
-        // Borda superior
+        // Top border
         ansi::move_to(out, lx, ty);
         write!(out, "┌{:─^1$}┐", format!(" {} ", title), vw).unwrap();
 
-        // Limpa interior
+        // Clear interior
         for i in 1..(self.height - 1) {
             ansi::move_to(out, lx + 1, ty + i);
             write!(out, "{:1$}", "", vw).unwrap();
         }
 
-        // Coluna esquerda
+        // Left column
         for i in 1..(self.height - 1) {
             ansi::move_to(out, lx, ty + i);
             write!(out, "│").unwrap();
         }
 
-        // Coluna direita: sempre borda
+        // Right column
         for i in 1..(self.height - 1) {
             ansi::move_to(out, rx, ty + i);
             write!(out, "│").unwrap();
         }
 
-        // Borda inferior: sempre borda
+        // Bottom border
         ansi::move_to(out, lx, by);
         write!(out, "└{:─<1$}┘", "", vw).unwrap();
 
-        // Scrollbar horizontal interior: penúltima linha, lx+1 .. rx-1
+        // Interior horizontal scrollbar: second-to-last row, lx+1 .. rx-1
         if self.has_hscroll() {
             let htrack = vw.saturating_sub(if self.has_vscroll() { 1 } else { 0 });
             let (htp, htl) = Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
@@ -113,7 +113,7 @@ impl Window {
             }
         }
 
-        // Scrollbar vertical interior: penúltima coluna, ty+1 .. by-2 (ou by-1 sem hscroll)
+        // Interior vertical scrollbar: second-to-last column, ty+1 .. by-2 (or by-1 without hscroll)
         if self.has_vscroll() {
             let vtrack = vh.saturating_sub(if self.has_hscroll() { 1 } else { 0 });
             let (vtp, vtl) = Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
@@ -124,7 +124,7 @@ impl Window {
         }
     }
 
-    /// Retorna o caractere visível na borda em (x, y), ou None se for interior.
+    /// Return the visible border character at (x, y), or None for the interior.
     pub fn char_at(&self, x: u16, y: u16, title: &str) -> Option<char> {
         let lx = self.position_x;
         let rx = self.position_x + self.width - 1;
@@ -148,7 +148,7 @@ impl Window {
         if x == rx { return Some('│'); }
         if x == lx { return Some('│'); }
 
-        // Interior: scrollbar vertical (penúltima coluna, excluindo junção)
+        // Interior: vertical scrollbar (second-to-last column, excluding the junction)
         let vw = self.visible_w();
         let vh = self.visible_h();
         let both = self.has_vscroll() && self.has_hscroll();
@@ -159,7 +159,7 @@ impl Window {
             return Some(Self::scroll_char(vtp, vtl, (y - ty - 1) as usize));
         }
 
-        // Interior: scrollbar horizontal (penúltima linha, excluindo junção)
+        // Interior: horizontal scrollbar (second-to-last row, excluding the junction)
         if self.has_hscroll() && y == by - 1 && x > lx && x < rx {
             let col = (x - lx - 1) as usize;
             let htrack = vw.saturating_sub(if both { 1 } else { 0 });
@@ -172,8 +172,8 @@ impl Window {
         None
     }
 
-    /// Processa uma ação (Space) na posição (x, y).
-    /// Retorna true se a janela consumiu a ação (scroll atualizado).
+    /// Handle an action (Space) at (x, y).
+    /// Returns true if the window consumed it (scroll updated).
     pub fn interact(&mut self, x: u16, y: u16) -> bool {
         let lx = self.position_x;
         let rx = self.position_x + self.width - 1;
@@ -184,7 +184,7 @@ impl Window {
 
         let both = self.has_vscroll() && self.has_hscroll();
 
-        // Scrollbar vertical interior: penúltima coluna (excluindo junção)
+        // Interior vertical scrollbar: second-to-last column (excluding the junction)
         if self.has_vscroll() && x == rx - 1 && y > ty && y < by {
             if both && y == by - 1 { return false; }
             let vtrack = vh.saturating_sub(if both { 1 } else { 0 });
@@ -198,7 +198,7 @@ impl Window {
             return true;
         }
 
-        // Scrollbar horizontal interior: penúltima linha (excluindo junção)
+        // Interior horizontal scrollbar: second-to-last row (excluding the junction)
         let htrack = vw.saturating_sub(if both { 1 } else { 0 });
         if self.has_hscroll() && y == by - 1 && x > lx && ((x - lx - 1) as usize) < htrack {
             let mid = lx + 1 + (htrack / 2) as u16;
@@ -214,7 +214,8 @@ impl Window {
         false
     }
 
-    /// Desenha o DELTA do novo tamanho sobre o frame já renderizado, sem apagar o original.
+    /// Draw the DELTA of the new size over the already rendered frame,
+    /// without erasing the original.
     pub fn draw_preview(&self, out: &mut impl Write, new_w: u16, new_h: u16) {
         if new_w == self.width && new_h == self.height {
             return;

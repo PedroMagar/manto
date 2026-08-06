@@ -1,3 +1,9 @@
+// Line editing, history navigation, and completion for command inputs.
+
+mod history;
+
+pub use history::History;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use crate::cmd::CommandEntry;
@@ -324,4 +330,74 @@ pub fn autocomplete_input(input: &mut String, cursor: &mut usize, current_path: 
 
     replace_token(input, cursor, start, end, &replacement);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::{CommandEntry, CommandStatus};
+
+    fn fixture_commands() -> Vec<CommandEntry> {
+        vec![
+            CommandEntry::fixture("echo a", &["a"], CommandStatus::Complete),
+            CommandEntry::fixture("echo b", &["b"], CommandStatus::Complete),
+            CommandEntry::fixture("echo c", &["c"], CommandStatus::Complete),
+        ]
+    }
+
+    #[test]
+    fn history_up_walks_back_from_latest() {
+        let commands = fixture_commands();
+        let mut input = String::new();
+        let mut index = None;
+        let mut draft = None;
+
+        assert!(history_up(&commands, &mut input, &mut index, &mut draft));
+        assert_eq!(input, "echo c");
+        assert_eq!(index, Some(2));
+
+        assert!(history_up(&commands, &mut input, &mut index, &mut draft));
+        assert_eq!(input, "echo b");
+        assert_eq!(index, Some(1));
+    }
+
+    #[test]
+    fn history_down_restores_draft_after_latest() {
+        let commands = fixture_commands();
+        let mut input = String::from("ec");
+        let mut index = None;
+        let mut draft = None;
+
+        history_up(&commands, &mut input, &mut index, &mut draft);
+        history_down(&commands, &mut input, &mut index, &mut draft);
+
+        assert_eq!(input, "ec");
+        assert_eq!(index, None);
+    }
+
+    #[test]
+    fn token_bounds_find_current_word() {
+        let input = "cd targ";
+        assert_eq!(token_bounds(input, 7), (3, 7));
+        assert_eq!(token_bounds(input, 2), (0, 2));
+    }
+
+    #[test]
+    fn autocomplete_cd_completes_directory() {
+        let base = std::env::temp_dir().join(format!("manto-test-{}", std::process::id()));
+        let target = base.join("target-dir");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let mut input = String::from("cd tar");
+        let mut cursor = input_char_len(&input);
+        let base_str = base.display().to_string();
+
+        let changed = autocomplete_input(&mut input, &mut cursor, &base_str);
+
+        assert!(changed);
+        assert!(input.starts_with("cd target-dir"));
+        assert!(input.ends_with(std::path::MAIN_SEPARATOR));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

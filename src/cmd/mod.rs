@@ -122,7 +122,7 @@ impl CommandEntry {
             && self.command.trim().split_whitespace().next() == Some("exit")
     }
 
-    /// Avança um tick. Retorna true se houve mudança.
+    /// Advance one tick. Returns true if anything changed.
     pub fn tick(&mut self) -> bool {
         let Some(mut runner) = self.runner.take() else {
             return false;
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn unicode_command_preserves_accents_through_oneshot() {
-        // Verifica que "ç/ã" chegam ao comando e voltam na saída (encoding UTF-8).
+        // Check that "ç/ã" reach the command and come back in the output (UTF-8).
         let cwd = std::env::current_dir().unwrap();
         let cwd = cwd.to_string_lossy().to_string();
         let mut cmd = CommandEntry::spawn("echo manto_çã_ñ", &cwd);

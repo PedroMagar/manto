@@ -365,7 +365,7 @@ unsafe fn cleanup_conpty_failed(
 }
 
 /// Split complete lines out of `residue`, sending each as a TerminalUpdate::Line.
-/// Retorna true se alguma linha terminada em newline foi emitida.
+/// Returns true if any newline-terminated line was emitted.
 fn drain_lines(residue: &mut String, tx: &Sender<TerminalUpdate>) -> bool {
     let mut drained = false;
     while let Some(pos) = residue.find('\n') {
@@ -379,8 +379,8 @@ fn drain_lines(residue: &mut String, tx: &Sender<TerminalUpdate>) -> bool {
     drained
 }
 
-/// Há bytes já disponíveis no pipe sem bloquear? (para decidir se um partial
-/// é um prompt estabilizado e merece ser emitido já).
+/// Are bytes already available on the pipe without blocking? (used to decide
+/// whether a partial is a stabilized prompt that should be emitted now).
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn pipe_has_data(h: Handle) -> bool {
     let mut avail: Dword = 0;
@@ -388,12 +388,12 @@ unsafe fn pipe_has_data(h: Handle) -> bool {
         && avail > 0
 }
 
-/// Lê um stream de bytes de forma lossy (aceita codepages OEM não-UTF-8 sem
-/// derrubar a thread) e emite `TerminalUpdate::Line` por linha quebrada.
+/// Read a byte stream lossily (accepting non-UTF-8 OEM codepages without
+/// crashing the thread) and emit one `TerminalUpdate::Line` per broken line.
 ///
-/// Saída parcial sem newline (ex.: prompt `>>> ` de REPLs) é emitida assim que
-/// o pipe fica momentaneamente vazio (não há mais dados iminentes), evitando
-/// que fique presa esperando um `\n` que não virá.
+/// Partial output without a newline (e.g. a `>>> ` REPL prompt) is emitted as
+/// soon as the pipe is momentarily empty (no more data imminent), avoiding it
+/// being stuck waiting for a `\n` that never comes.
 fn read_lossy_stream<R: Read>(mut stream: R, raw: Handle, tx: &Sender<TerminalUpdate>) {
     let mut buf = [0u8; 4096];
     let mut residue = String::new();
@@ -403,8 +403,8 @@ fn read_lossy_stream<R: Read>(mut stream: R, raw: Handle, tx: &Sender<TerminalUp
             Ok(n) => {
                 residue.push_str(&String::from_utf8_lossy(&buf[..n]));
                 drain_lines(&mut residue, tx);
-                // Saída parcial estabilizada: sem mais dados no pipe, é um
-                // prompt/progresso — emite agora.
+                // Stabilized partial output: with no more data in the pipe it
+                // is a prompt/progress — emit now.
                 if !residue.trim().is_empty() && !unsafe { pipe_has_data(raw) } {
                     let part = residue.trim_end().to_string();
                     if !part.is_empty() {
@@ -519,7 +519,7 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     use std::os::windows::io::AsRawHandle;
-    // usize é Send; o Handle bruto é recriado dentro das threads.
+    // usize is Send; the raw Handle is recreated inside the threads.
     let stdout_raw = stdout.as_raw_handle() as usize;
     let stderr_raw = stderr.as_raw_handle() as usize;
 
@@ -534,14 +534,14 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
         }
     });
 
-    // stdout reader (leitura lossy: saída pode vir em codepage OEM não-UTF-8).
+    // stdout reader (lossy read: output may come in a non-UTF-8 OEM codepage).
     let tx_out = tx.clone();
     thread::spawn(move || {
         read_lossy_stream(stdout, stdout_raw as Handle, &tx_out);
         let _ = tx_out.send(TerminalUpdate::Closed);
     });
 
-    // stderr reader (leitura lossy).
+    // stderr reader (lossy read).
     let tx_err = tx.clone();
     thread::spawn(move || {
         read_lossy_stream(stderr, stderr_raw as Handle, &tx_err);
@@ -609,17 +609,17 @@ impl PlatformCommand {
     }
 }
 
-/// Cache de viabilidade do ConPTY: em hosts onde um filho não consegue anexar
-/// ao pseudo console (ex.: automação), o ConPTY fica quebrado permanentemente.
-/// Detectar uma única vez evita o custo de reprobe a cada terminal aberto.
+/// ConPTY viability cache: on hosts where a child cannot attach to the
+/// pseudo console (e.g. automation), ConPTY stays broken permanently.
+/// Detecting it once avoids re-probing on every terminal opened.
 static CONPTY_VIABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Sonda se o ConPTY realmente anexa um filho neste host.
+/// Probe whether ConPTY can actually attach a child on this host.
 ///
-/// Cria um ConPTY descartável (com CREATE_NO_WINDOW, para não vazar o banner
-/// do shell para o console real), envia `echo <marcador>` e verifica se o
-/// marcador volta pela saída. Se não voltar, ConPTY está inoperante e devemos
-/// usar o fallback por pipes.
+/// Creates a disposable ConPTY (with CREATE_NO_WINDOW, so the shell banner
+/// does not leak into the real console), sends `echo <marker>` and checks
+/// whether the marker comes back through the output. If it does not, ConPTY
+/// is inoperative and the pipe fallback should be used.
 fn conpty_is_viable(command: &str, cwd: &str) -> bool {
     const MARKER: &str = "manto_conpty_probe_4829";
     let (ptx, prx) = std::sync::mpsc::channel::<TerminalUpdate>();
@@ -672,7 +672,7 @@ mod tests {
         use std::os::windows::process::CommandExt;
         use std::time::{Duration, Instant};
 
-        // Filho escreve "TAGABC" sem newline, dorme, depois "X\n".
+        // Child writes "TAGABC" without a newline, sleeps, then "X\n".
         let mut child = Command::new("python")
             .args(["-c", "import sys,time; sys.stdout.write('TAGABC'); sys.stdout.flush(); time.sleep(1); sys.stdout.write('X\\n')"])
             .stdout(Stdio::piped())
@@ -698,11 +698,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // O partial "TAGABC" (sem newline) deve ter sido emitido sozinho,
-        // antes do "X" — não pode ficar preso nem se fundir a "TAGABCX".
+        // The "TAGABC" partial (no newline) must have been emitted on its
+        // own, before "X" — it cannot stay stuck nor merge into "TAGABCX".
         assert!(
             lines.iter().any(|l| l.contains("TAGABC") && !l.contains('X')),
-            "partial não liberado/fundido: {lines:?}"
+            "partial not released/merged: {lines:?}"
         );
         let _ = child.kill();
         let _ = child.wait();
@@ -731,7 +731,7 @@ mod tests {
             Err(format!("no marker[{idx}]; got={got:?}"))
         }
 
-        // O primeiro spawn roda o probe ConPTY (cached). Verifica o segundo.
+        // The first spawn runs the ConPTY probe (cached). Check the second.
         let _ = probe_echo(1, &cwd);
         let r2 = probe_echo(2, &cwd);
         eprintln!("DEBUG second session result: {:?}", r2);
