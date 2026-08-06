@@ -104,13 +104,12 @@ pub fn push_shell_command(commands: &mut Vec<CommandEntry>, current_path: &mut S
         return;
     }
     let command_cwd = current_path.clone();
-    let first_word = trimmed.split_whitespace().next().unwrap_or(trimmed);
 
-    match first_word {
-        "cd" => {
+    match trimmed.split_whitespace().next() {
+        Some("cd") => {
             let rest = trimmed.strip_prefix("cd ").or_else(|| trimmed.strip_prefix("cd\t"));
             match rest {
-                Some("") => {
+                Some("") | None => {
                     commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![command_cwd.clone()]));
                 }
                 Some(rest) => {
@@ -122,12 +121,11 @@ pub fn push_shell_command(commands: &mut Vec<CommandEntry>, current_path: &mut S
                         Err(err) => commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![err])),
                     }
                 }
-                None => {
-                    commands.push(CommandEntry::completed(trimmed, &command_cwd, vec![command_cwd.clone()]));
-                }
             }
         }
-        "pwd" | "clear" | "help" | "exit" => {
+        Some("pwd" | "clear" | "help" | "exit") => {
+            // With persistent shell sessions, builtins are handled by the shell itself.
+            // These entries are only used in dock (Typing) mode, so keep local execution there.
             let output = CommandEntry::run_builtin(trimmed, current_path);
             commands.push(CommandEntry::completed(trimmed, &command_cwd, output));
         }
@@ -141,6 +139,9 @@ pub fn interact_terminal_horizontal_scroll(app: &mut Application, x: u16, y: u16
     let Some(term) = app.terminal.as_ref() else {
         return false;
     };
+    if term.shell_session.is_some() {
+        return false; // sessões não têm scroll horizontal
+    }
     let Some(win) = app.window() else {
         return false;
     };
@@ -170,18 +171,82 @@ pub fn interact_terminal_horizontal_scroll(app: &mut Application, x: u16, y: u16
     false
 }
 
+/// Interage com a scrollbar vertical de uma sessão de shell: mover o ponteiro
+/// sobre a coluna da scrollbar posiciona o `panel_scroll` proporcionalmente.
+pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) -> bool {
+    let Some(term) = app.terminal.as_ref() else {
+        return false;
+    };
+    if term.shell_session.is_none() {
+        return false;
+    }
+    let Some(win) = app.window() else {
+        return false;
+    };
+    if win.height < 5 {
+        return false;
+    }
+    let content_h = win.height.saturating_sub(4) as usize;
+    let sb_x = win.position_x.saturating_add(win.width).saturating_sub(2);
+    if x != sb_x {
+        return false;
+    }
+    let top = win.position_y + 1;
+    if y < top || y >= top + content_h as u16 {
+        return false;
+    }
+
+    let lines_len = term.shell_lines.len();
+    if lines_len <= content_h {
+        if let Some(t) = app.terminal.as_mut() {
+            if t.panel_scroll != 0 {
+                t.panel_scroll = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+    let max_scroll = lines_len - content_h;
+    let track = content_h;
+    // Instagram na faixa: topo (idx 0) = início do conteúdo (panel_scroll=max),
+    // fundo (idx track-1) = mais recente (panel_scroll=0). O `panel_scroll` é
+    // "quanto subiu do fim", então invertemos o índice.
+    let idx = (y - top) as usize;
+    let down = ((idx + 1) * max_scroll / track).min(max_scroll);
+    let target = max_scroll.saturating_sub(down);
+
+    if let Some(t) = app.terminal.as_mut() {
+        if t.panel_scroll != target {
+            t.panel_scroll = target;
+            return true;
+        }
+    }
+    false
+}
+
 pub fn sync_terminal_window_metrics(applications: &mut [Application]) {
     for app in applications.iter_mut() {
         let Some(term) = app.terminal.as_ref() else {
             continue;
         };
+        let is_session = term.shell_session.is_some();
         let content_w = crate::gui::terminal_content_width(&term.path, &term.commands);
 
         if let Some(win) = app.window_mut() {
-            let visible_w = win.width.saturating_sub(2) as usize;
-            let max_scroll = content_w.saturating_sub(visible_w) as u16;
-            win.content_w = content_w.min(u16::MAX as usize) as u16;
-            win.scroll_x = win.scroll_x.min(max_scroll);
+            if is_session {
+                // Sessões de shell não usam scroll horizontal; o scroll vertical
+                // é intra-janela (draw_shell_content). content_w = 0 desativa o
+                // scrollbar horizontal do chrome.
+                win.content_w = 0;
+                win.content_h = 0;
+                win.scroll_x = 0;
+            } else {
+                let visible_w = win.width.saturating_sub(2) as usize;
+                let max_scroll = content_w.saturating_sub(visible_w) as u16;
+                win.content_w = content_w.min(u16::MAX as usize) as u16;
+                win.scroll_x = win.scroll_x.min(max_scroll);
+                win.content_h = 0;
+            }
         }
     }
 }

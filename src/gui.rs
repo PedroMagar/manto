@@ -263,6 +263,92 @@ pub fn draw_terminal_content(
     write!(out, "{}{:<width$}", TERMINAL_INPUT_PREFIX, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
 }
 
+/// Desenha a saída bruta de uma sessão de shell persistente.
+///
+/// Quando `TerminalState.shell_session` está ativo, a janela mostra o fluxo de
+/// linhas do shell, com scroll vertical e seguindo o fim por padrão.
+///
+/// Layout interno (de cima para baixo):
+///   rows 1 .. h-4  : saída do shell (scroll; coluna à direita = scrollbar vertical)
+///   row  h-3       : ├─ path ────────────────────────────────────────────────┤
+///   row  h-2       : │ .> (linha de input; conteúdo do terminal focalizado)    │
+///   row  h-1       : (borda inferior, renderizada pelo chrome)
+pub fn draw_shell_content(
+    out:          &mut impl Write,
+    win:          &Window,
+    lines:        &[String],
+    panel_scroll: usize,
+) {
+    if win.height < 5 { return; }
+
+    let lx      = win.position_x;
+    let ty      = win.position_y;
+    let inner_w = (win.width - 2) as usize;
+
+    let content_h = win.height.saturating_sub(4) as usize;
+    if content_h == 0 { return; }
+
+    let has_vscroll = lines.len() > content_h;
+    let content_w = inner_w.saturating_sub(if has_vscroll { 1 } else { 0 });
+    let max_scroll = lines.len().saturating_sub(content_h);
+    let scroll     = panel_scroll.min(max_scroll);
+
+    if has_vscroll {
+        // Overflow: janela deslizante sobre as linhas, seguindo o fim por padrão.
+        let end   = lines.len().saturating_sub(scroll);
+        let start = end.saturating_sub(content_h);
+        let mut row = 0usize;
+        for i in start..end {
+            ansi::move_to(out, lx + 1, ty + 1 + row as u16);
+            let display = slice_line(&lines[i], 0, content_w);
+            write!(out, "{:<width$}", display, width = content_w).unwrap();
+            row += 1;
+        }
+        for r in row..content_h {
+            ansi::move_to(out, lx + 1, ty + 1 + r as u16);
+            write!(out, "{:<width$}", "", width = content_w).unwrap();
+        }
+
+        // Scrollbar vertical. `draw_scrollbar` espera `scroll` como "posição do
+        // topo" (0 = topo, max = fundo); aqui `scroll` é "quanto subiu do fim"
+        // (0 = mais recente no fundo), então invertemos.
+        draw_scrollbar(
+            out,
+            lx + inner_w as u16,
+            ty + 1,
+            ty + content_h as u16,
+            lines.len(),
+            content_h,
+            max_scroll.saturating_sub(scroll),
+        );
+    } else {
+        // Sem overflow: alinha as linhas embaixo (junto da linha de input),
+        // deixando o espaçamento acima. Não há para onde rolar.
+        let offset = content_h - lines.len();
+        for r in 0..offset {
+            ansi::move_to(out, lx + 1, ty + 1 + r as u16);
+            write!(out, "{:<width$}", "", width = content_w).unwrap();
+        }
+        for (i, line) in lines.iter().enumerate() {
+            ansi::move_to(out, lx + 1, ty + 1 + (offset + i) as u16);
+            let display = slice_line(line, 0, content_w);
+            write!(out, "{:<width$}", display, width = content_w).unwrap();
+        }
+    }
+
+    // ── Separador de path ─────────────────────────────────────────────────────
+    let path_y = ty + win.height - 3;
+    ansi::move_to(out, lx, path_y);
+    write!(out, "├{:─<1$}┤", "", inner_w).unwrap();
+
+    // ── Linha de input (prefixo; o conteúdo do terminal focalizado é
+    //    desenhado pelo loop principal por cima deste prefixo) ────────────────
+    let input_y = ty + win.height - 2;
+    let prefix_len = TERMINAL_INPUT_PREFIX.chars().count();
+    ansi::move_to(out, lx + 1, input_y);
+    write!(out, "{}{:<width$}", TERMINAL_INPUT_PREFIX, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
+}
+
 // ── Painel de comandos ────────────────────────────────────────────────────────
 
 /// Quebra `line` em fatias de `width` caracteres.

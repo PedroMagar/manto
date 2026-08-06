@@ -280,10 +280,38 @@ mod platform {
                         return Key::Escape;
                     }
                 }
-                b if b.is_ascii_graphic() || b == b' ' => return Key::Char(buf[0] as char),
+                b if b.is_ascii_graphic() || b == b' ' => return Key::Char(b as char),
+                b if b >= 0x80 => {
+                    if let Some(c) = read_utf8_char(b) {
+                        if !c.is_control() {
+                            return Key::Char(c);
+                        }
+                    }
+                    continue;
+                }
                 _ => continue,
             }
         }
+    }
+
+    /// Decodifica um caractere UTF-8 a partir do primeiro byte já lido,
+    /// consumindo os bytes de continuação necessários de stdin.
+    fn read_utf8_char(first: u8) -> Option<char> {
+        let (extra, mut cp) = match first {
+            0xC2..=0xDF => (1, (first & 0x1F) as u32),
+            0xE0..=0xEF => (2, (first & 0x0F) as u32),
+            0xF0..=0xF4 => (3, (first & 0x07) as u32),
+            _ => return None,
+        };
+        for _ in 0..extra {
+            let mut byte = [0u8; 1];
+            std::io::stdin().read_exact(&mut byte).ok()?;
+            if byte[0] & 0xC0 != 0x80 {
+                return None;
+            }
+            cp = (cp << 6) | ((byte[0] & 0x3F) as u32);
+        }
+        char::from_u32(cp)
     }
 
     pub fn held_arrow_keys() -> super::HeldArrowKeys {
@@ -531,7 +559,7 @@ mod platform {
                 }
 
                 if let Some(c) = char::from_u32(ch as u32) {
-                    if c.is_ascii_graphic() || c == ' ' { return Key::Char(c); }
+                    if !c.is_control() { return Key::Char(c); }
                 }
             }
         }

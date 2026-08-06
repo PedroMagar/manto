@@ -1,11 +1,18 @@
 use std::mem;
 
 use crate::cmd::{CommandEntry, tick_all};
+use crate::terminal_backend::CommandSession;
 use crate::window::Window;
 
 // ── Estado de janela terminal ─────────────────────────────────────────────────
 
 pub struct TerminalState {
+    /// Persistent shell session for this terminal window.
+    /// When Some, raw keyboard input is forwarded to the shell.
+    pub shell_session: Option<CommandSession>,
+    /// Accumulated raw output lines drained from the shell session.
+    pub shell_lines:   Vec<String>,
+    /// Historical command entries (displayed in the terminal content).
     pub commands:     Vec<CommandEntry>,
     pub cmd_input:    String,
     pub input_cursor: usize,
@@ -18,6 +25,8 @@ pub struct TerminalState {
 impl TerminalState {
     pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
         Self {
+            shell_session: None,
+            shell_lines: Vec::new(),
             path,
             commands,
             cmd_input: String::new(),
@@ -28,9 +37,84 @@ impl TerminalState {
         }
     }
 
-    /// Avança um tick em todos os comandos. Retorna true se houve mudança.
+    /// Create a new TerminalState with an active shell session.
+    pub fn with_shell(path: String, commands: Vec<CommandEntry>) -> Result<Self, String> {
+        // Spawn a shell that will persist for the lifetime of this terminal window.
+        // The shell runs as an interactive session.
+        #[cfg(not(windows))]
+        let shell_cmd = "/bin/sh".to_string();
+
+        #[cfg(windows)]
+        let shell_cmd = {
+            if std::path::Path::new("pwsh.exe").exists() {
+                "pwsh.exe".to_string()
+            } else if std::path::Path::new("powershell.exe").exists() {
+                "powershell.exe".to_string()
+            } else {
+                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+            }
+        };
+
+        let mut session = CommandSession::spawn(&shell_cmd, &path)?;
+
+        // Set initial terminal size
+        let (cols, rows) = crate::os::size();
+        session.resize(cols.saturating_sub(4), rows.saturating_sub(6));
+
+        let shell_lines = Self::seed_shell_lines(&commands);
+        Ok(Self {
+            shell_session: Some(session),
+            shell_lines,
+            path,
+            commands,
+            cmd_input: String::new(),
+            input_cursor: 0,
+            panel_scroll: 0,
+            history_index: None,
+            history_draft: None,
+        })
+    }
+
+    /// Converte o histórico de comandos do dock em linhas de visualização do
+    /// terminal, preservando o histórico ao transformar o dock em janela.
+    fn seed_shell_lines(commands: &[CommandEntry]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for entry in commands {
+            if !entry.command.trim().is_empty() {
+                lines.push(entry.command.clone());
+            }
+            lines.extend(entry.output_lines.iter().cloned());
+        }
+        lines
+    }
+
+    /// Avança um tick: drena saída de sessão e faz tick dos comandos.
+    /// Retorna true se houve mudança.
     pub fn tick(&mut self) -> bool {
-        tick_all(&mut self.commands)
+        let mut changed = tick_all(&mut self.commands);
+        if let Some(ref mut session) = self.shell_session {
+            let poll = session.poll();
+            for line in poll.lines {
+                self.push_shell_line(line);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Adiciona uma linha ao fluxo visual do shell, limitando o histórico.
+    pub fn push_shell_line(&mut self, line: String) {
+        self.shell_lines.push(line);
+        const MAX_SHELL_LINES: usize = 2000;
+        if self.shell_lines.len() > MAX_SHELL_LINES {
+            let excess = self.shell_lines.len() - MAX_SHELL_LINES;
+            self.shell_lines.drain(..excess);
+        }
+    }
+
+    /// True se a janela de terminal possui uma sessão de shell ativa.
+    pub fn has_session(&self) -> bool {
+        self.shell_session.is_some()
     }
 }
 
@@ -61,14 +145,26 @@ impl Application {
         Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: true, terminal: None }
     }
 
-    /// Cria uma janela de terminal com histórico de comandos pré-carregado.
+    /// Cria uma janela de terminal com histórico de comandos pré-carregado e sessão de shell persistente.
     pub fn terminal_window(title: impl Into<String>, window: Window, path: String, commands: Vec<CommandEntry>) -> Self {
-        Self {
-            title:    title.into(),
-            display:  DisplayMode::Windowed(window),
-            desktop:  1,
-            is_menu:  false,
-            terminal: Some(TerminalState::new(path, commands)),
+        match TerminalState::with_shell(path.clone(), commands.clone()) {
+            Ok(ts) => Self {
+                title:    title.into(),
+                display:  DisplayMode::Windowed(window),
+                desktop:  1,
+                is_menu:  false,
+                terminal: Some(ts),
+            },
+            Err(_) => {
+                // Fallback to non-session mode if shell spawn fails
+                Self {
+                    title:    title.into(),
+                    display:  DisplayMode::Windowed(window),
+                    desktop:  1,
+                    is_menu:  false,
+                    terminal: Some(TerminalState::new(path, commands)),
+                }
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-mod ansi;
+﻿mod ansi;
 mod application;
 mod cmd;
 mod gui;
@@ -11,28 +11,44 @@ mod window;
 mod wm;
 
 use gui::{draw_desktop, draw_status_bar, draw_tab, draw_scrollbar, draw_command_panel,
-          draw_terminal_content, tab_char_at, scrollbar_thumb, desktop_at,
+          draw_terminal_content, draw_shell_content, tab_char_at, scrollbar_thumb, desktop_at,
           STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, CMD_INPUT_X, DESKTOP_AREA_LEN,
           TERMINAL_INPUT_PREFIX};
 use cmd::{CommandEntry, tick_all};
 use history::History;
 pub use application::{Application, TerminalState};
-use window::{Window, MIN_W, MIN_H};
+use window::{MIN_W, MIN_H};
 use os::{Writer, Clock, Key};
 use pointer::Pointer;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::wm::{SnapRegion, resolve_snap_region, normalize_host_path, push_shell_command,
+use crate::wm::{resolve_snap_region, normalize_host_path, push_shell_command,
                 sync_terminal_window_metrics, topmost_window_at, tab_layout, max_tab_scroll,
                 close_active_window, bring_window_to_front, spawn_terminal_window,
                 split_active_terminal_window, toggle_start_menu, toggle_active_maximize,
                 minimize_active_window, focus_relative_window, move_active_window_to_desktop,
-                snap_rect, snap_active_window, place_pointer_on_terminal_input,
+                snap_active_window, place_pointer_on_terminal_input,
                 enter_active_resize_mode, apply_resize_edit, ResizeEditState, Mode};
 
-fn render(
-    out: &mut Writer,
+/// Reescreve comandos de REPLs conhecidos para o modo interativo explícito.
+///
+/// Em fallback por pipes (host sem pseudo-terminal real), `python` sem `-i`
+/// lê stdin como script e só executa no EOF; com `-i` o REPL processa linha a
+/// linha. Somente invocações nuas (sem argumentos) são reescritas.
+fn interactive_command(cmd: &str) -> String {
+    match cmd.trim() {
+        // Em pipe (sem PTY real) `python` lê stdin como script até EOF.
+        // Com `-i` o REPL processa linha a linha e exibe o prompt.
+        c if c.eq_ignore_ascii_case("python")  => "python -i".to_string(),
+        c if c.eq_ignore_ascii_case("python2") => "python2 -i".to_string(),
+        c if c.eq_ignore_ascii_case("python3") => "python3 -i".to_string(),
+        _ => cmd.to_string(),
+    }
+}
+
+fn render<W: std::io::Write>(
+    out: &mut W,
     applications: &[Application],
     resize_preview: Option<(usize, u16, u16)>,
     cursor_interaction: Option<char>,
@@ -57,7 +73,11 @@ fn render(
             if let Some(win) = app.window() {
                 win.draw(out, &app.title);
                 if let Some(term) = app.terminal.as_ref() {
-                    draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
+                    if term.shell_session.is_some() {
+                        draw_shell_content(out, win, &term.shell_lines, term.panel_scroll);
+                    } else {
+                        draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
+                    }
                 }
             }
         }
@@ -104,6 +124,8 @@ fn render(
         write!(out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
     }
 
+    let input_active = typing_input.is_some() || focused_terminal.is_some();
+
     if let Some((input, cursor_pos)) = typing_input {
         let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
         let (display, cursor_col) = input::input_view(input, cursor_pos, max_len);
@@ -132,51 +154,53 @@ fn render(
         }
     } else {
         ansi::hide_cursor(out);
-        let effective_cursor = cursor_interaction.or_else(|| {
-            let px = pointer.x;
-            let py = pointer.y;
+    }
+    let effective_cursor = cursor_interaction.or_else(|| {
+        let px = pointer.x;
+        let py = pointer.y;
 
-            if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
-                let track_len = (sb_bot - sb_top + 1) as usize;
-                let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
-                let row = (py - sb_top) as usize;
-                return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
+        if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
+            let track_len = (sb_bot - sb_top + 1) as usize;
+            let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
+            let row = (py - sb_top) as usize;
+            return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
+        }
+
+        if px >= tab_x && px < sb_x {
+            if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
+                .find(|&&(_, ty, th)| py >= ty && py < ty + th)
+            {
+                return Some(tab_char_at(
+                    tab_x, tab_y, tab_h,
+                    &applications[app_idx].title,
+                    px, py, scroll_offset,
+                ));
             }
+        }
 
-            if px >= tab_x && px < sb_x {
-                if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
-                    .find(|&&(_, ty, th)| py >= ty && py < ty + th)
-                {
-                    return Some(tab_char_at(
-                        tab_x, tab_y, tab_h,
-                        &applications[app_idx].title,
-                        px, py, scroll_offset,
-                    ));
+        let start_end = STATUS_START_X + STATUS_START.len() as u16;
+        if py == h - 2 && px >= STATUS_START_X && px < start_end {
+            return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
+        }
+
+        if let Some(d) = desktop_at(px, py, w, h) {
+            let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
+            let sep_x  = base_x + (d as u16 - 1) * 4;
+            let offset = px - (sep_x + 1);
+            return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
+        }
+
+        if let Some(top_idx) = topmost_window_at(applications, current_desktop, px, py) {
+            if let Some(win) = applications[top_idx].window() {
+                if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
+                    return Some(ch);
                 }
             }
+        }
 
-            let start_end = STATUS_START_X + STATUS_START.len() as u16;
-            if py == h - 2 && px >= STATUS_START_X && px < start_end {
-                return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
-            }
-
-            if let Some(d) = desktop_at(px, py, w, h) {
-                let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
-                let sep_x  = base_x + (d as u16 - 1) * 4;
-                let offset = px - (sep_x + 1);
-                return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
-            }
-
-            if let Some(top_idx) = topmost_window_at(applications, current_desktop, px, py) {
-                if let Some(win) = applications[top_idx].window() {
-                    if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
-                        return Some(ch);
-                    }
-                }
-            }
-
-            None
-        });
+        None
+    });
+    if !input_active {
         pointer.draw(out, effective_cursor);
     }
 
@@ -299,6 +323,15 @@ fn main() {
                     }
                 }
                 Key::CtrlW => {
+                    if let Some(idx) = wm::active_window_idx(&applications, &mode, current_desktop) {
+                        if applications[idx].terminal.is_some() {
+                            if let Some(t) = applications[idx].terminal.as_mut() {
+                                if let Some(mut session) = t.shell_session.take() {
+                                    session.kill();
+                                }
+                            }
+                        }
+                    }
                     if close_active_window(&mut applications, &mut mode, current_desktop, last_size.1, &mut tab_scroll) {
                         mode_changed = true;
                     }
@@ -361,14 +394,21 @@ fn main() {
                     match &mode {
                         Mode::TerminalFocus { app_idx } => {
                             if let Some(t) = applications[*app_idx].terminal.as_mut() {
-                                for cmd in t.commands.iter_mut().rev() {
-                                    if cmd.is_running_external() {
-                                        cmd.kill();
-                                        t.commands.push(CommandEntry::completed(
-                                            "^C", &t.path, vec!["".to_string()],
-                                        ));
-                                        mode_changed = true;
-                                        break;
+                                if let Some(ref mut session) = t.shell_session {
+                                    // Forward ^C to the live shell session.
+                                    session.write(&[3]);
+                                    mode_changed = true;
+                                } else {
+                                    // Fallback: interrupt a running one-shot command.
+                                    for cmd in t.commands.iter_mut().rev() {
+                                        if cmd.is_running_external() {
+                                            cmd.kill();
+                                            t.commands.push(CommandEntry::completed(
+                                                "^C", &t.path, vec!["".to_string()],
+                                            ));
+                                            mode_changed = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -499,6 +539,7 @@ fn main() {
                                                 false
                                             };
                                             handled || wm::interact_terminal_horizontal_scroll(app, pointer.x, pointer.y)
+                                                || wm::interact_terminal_vertical_scroll(app, pointer.x, pointer.y)
                                         } else {
                                             false
                                         };
@@ -552,6 +593,11 @@ fn main() {
                                             applications[top_idx].minimize();
                                             mode_changed = true;
                                         } else if is_close && win_closable {
+                                            if let Some(t) = applications[top_idx].terminal.as_mut() {
+                                                if let Some(mut session) = t.shell_session.take() {
+                                                    session.kill();
+                                                }
+                                            }
                                             applications.remove(top_idx);
                                             tab_scroll = tab_scroll
                                                 .min(max_tab_scroll(&applications, current_desktop, last_size.1));
@@ -819,91 +865,174 @@ fn main() {
                                     mode_changed = true;
                                 }
                             }
-                            Key::Up => {
+                            _ => {
                                 if let Some(t) = applications[idx].terminal.as_mut() {
-                                    if input::history_up(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
-                                        t.input_cursor = input::input_char_len(&t.cmd_input);
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Down => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    if input::history_down(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
-                                        t.input_cursor = input::input_char_len(&t.cmd_input);
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Left => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    if input::move_input_cursor_left(&mut t.input_cursor) {
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Right => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor) {
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Tab => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                    if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Enter => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    let trimmed = t.cmd_input.trim().to_string();
-                                    if !trimmed.is_empty() {
-                                        push_shell_command(&mut t.commands, &mut t.path, &trimmed);
-                                        history.append(&trimmed);
-                                        if let Some(last) = t.commands.last() {
-                                            if last.is_exit() {
-                                                applications.remove(idx);
-                                                tab_scroll = tab_scroll.min(max_tab_scroll(&applications, current_desktop, last_size.1));
-                                                mode = Mode::Normal;
+                                    if t.shell_session.is_some() {
+                                        // Modo linha: echo local enquanto digita; o
+                                        // comando completo é enviado ao shell no Enter.
+                                        match key {
+                                            Key::Char(c) => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                input::insert_input_char(&mut t.cmd_input, &mut t.input_cursor, c);
                                                 mode_changed = true;
-                                                return;
                                             }
+                                            Key::Backspace => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::backspace_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Delete => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::delete_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Left => {
+                                                if input::move_input_cursor_left(&mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Right => {
+                                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Home => {
+                                                t.input_cursor = 0;
+                                                mode_changed = true;
+                                            }
+                                            Key::End => {
+                                                t.input_cursor = input::input_char_len(&t.cmd_input);
+                                                mode_changed = true;
+                                            }
+                                            Key::Up => {
+                                                if input::history_up(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                                    t.input_cursor = input::input_char_len(&t.cmd_input);
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Down => {
+                                                if input::history_down(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                                    t.input_cursor = input::input_char_len(&t.cmd_input);
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Tab => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Enter => {
+                                                let cmd = t.cmd_input.trim().to_string();
+                                                if !cmd.is_empty() {
+                                                    // Echo local + envio ao shell.
+                                                    if t.has_session() {
+                                                        t.push_shell_line(cmd.clone());
+                                                        // Registra no histórico local de navegação.
+                                                        t.commands.push(CommandEntry::completed(&cmd, &t.path, Vec::new()));
+                                                        const MAX_HISTORY: usize = 200;
+                                                        if t.commands.len() > MAX_HISTORY {
+                                                            t.commands.drain(..t.commands.len() - MAX_HISTORY);
+                                                        }
+                                                        // REPLs conhecidos: em fallback por pipes (sem PTY real) a
+                                                        // forma interativa exige `-i`; reescrevemos transparentemente.
+                                                        // Envia com final de linha `\r\n` (Python e muitos programas
+                                                        // exigem `\n`; só `\r` não os faz processar a linha).
+                                                        let line = format!("{}\r\n", interactive_command(&cmd));
+                                                        if let Some(ref mut session) = t.shell_session {
+                                                            session.write(line.as_bytes());
+                                                        }
+                                                    }
+                                                    t.cmd_input.clear();
+                                                    t.input_cursor = 0;
+                                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                    t.panel_scroll = 0;
+                                                }
+                                                mode_changed = true;
+                                            }
+                                            Key::CtrlD => {
+                                                // EOF/EOF-ish para tools que usam Ctrl+D (python 3, shells).
+                                                if let Some(ref mut session) = t.shell_session {
+                                                    session.write(&[4]);
+                                                }
+                                                mode_changed = true;
+                                            }
+                                            Key::CtrlZ => {
+                                                // EOF no Windows (python2 usa Ctrl+Z+Enter; tambem Ctrl+Z
+                                                // suspende job em shells unix). Encaminha o byte cru.
+                                                if let Some(ref mut session) = t.shell_session {
+                                                    session.write(&[26]);
+                                                }
+                                                mode_changed = true;
+                                            }
+                                            _ => {}
                                         }
-                                        t.cmd_input.clear();
-                                        t.input_cursor = 0;
-                                        input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                        t.panel_scroll = 0;
+                                    } else {
+                                        // Fallback sem sessão: edição local (legado).
+                                        match key {
+                                            Key::Up => {
+                                                if input::history_up(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                                    t.input_cursor = input::input_char_len(&t.cmd_input);
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Down => {
+                                                if input::history_down(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                                    t.input_cursor = input::input_char_len(&t.cmd_input);
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Left => {
+                                                if input::move_input_cursor_left(&mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Right => {
+                                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Tab => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Enter => {
+                                                let trimmed = t.cmd_input.trim().to_string();
+                                                if !trimmed.is_empty() {
+                                                    push_shell_command(&mut t.commands, &mut t.path, &trimmed);
+                                                    t.cmd_input.clear();
+                                                    t.input_cursor = 0;
+                                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                    t.panel_scroll = 0;
+                                                }
+                                                mode_changed = true;
+                                            }
+                                            Key::Delete => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::delete_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Backspace => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                if input::backspace_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                                    mode_changed = true;
+                                                }
+                                            }
+                                            Key::Char(c) => {
+                                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                                input::insert_input_char(&mut t.cmd_input, &mut t.input_cursor, c);
+                                                mode_changed = true;
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    mode_changed = true;
                                 }
                             }
-                            Key::Delete => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                    if input::delete_input_char(&mut t.cmd_input, &mut t.input_cursor) {
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Backspace => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                    if input::backspace_input_char(&mut t.cmd_input, &mut t.input_cursor) {
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                            Key::Char(c) => {
-                                if let Some(t) = applications[idx].terminal.as_mut() {
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                    input::insert_input_char(&mut t.cmd_input, &mut t.input_cursor, c);
-                                    mode_changed = true;
-                                }
-                            }
-                            _ => {}
                         }
                     },
                 },
@@ -1005,6 +1134,8 @@ fn main() {
 mod tests {
     use super::*;
     use crate::cmd::{CommandEntry, CommandStatus};
+    use crate::window::Window;
+    use crate::wm::{SnapRegion, snap_rect};
 
     fn fixture_commands() -> Vec<CommandEntry> {
         vec![
@@ -1208,5 +1339,308 @@ mod tests {
         assert_eq!((top.position_x, top.position_y, top.width, top.height), (10, 5, 20, 4));
         assert_eq!((bottom.position_x, bottom.position_y, bottom.width, bottom.height), (10, 9, 20, 4));
         assert_eq!(applications[1].terminal.as_ref().unwrap().path, "D:\\tmp");
+    }
+
+    #[test]
+    fn terminal_session_echo_and_output_accumulate() {
+        // Janela de terminal com sessão real. Em ambientes sem ConPTY usa o
+        // fallback por pipes; o fluxo (echo local + saída do shell) deve
+        // acumular em shell_lines.
+        let mut app = Application::terminal_window(
+            "Term",
+            Window::new(4, 4, 60, 25, 0),
+            ".".to_string(),
+            Vec::new(),
+        );
+        let t = app.terminal.as_mut().unwrap();
+        assert!(t.has_session(), "terminal should own a shell session");
+
+        // Digita um comando (echo local).
+        t.cmd_input = "echo echo_marker_9911".to_string();
+        t.input_cursor = t.cmd_input.chars().count();
+
+        // Enter: echo local + envio ao shell.
+        let cmd = t.cmd_input.trim().to_string();
+        t.push_shell_line(cmd.clone());
+        if let Some(ref mut session) = t.shell_session {
+            let line = format!("{}\r", cmd);
+            session.write(line.as_bytes());
+        }
+        t.cmd_input.clear();
+        t.input_cursor = 0;
+
+        // O echo local aparece imediatamente.
+        assert!(t.shell_lines.iter().any(|l| l.contains("echo_marker_9911")));
+
+        // A saída do shell chega por poll.
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut saw_output = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            t.tick();
+            // o shell repete a linha e/ou emite o resultado
+            if t.shell_lines.iter().filter(|l| l.contains("echo_marker_9911")).count() >= 2 {
+                saw_output = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(saw_output, "shell did not emit result lines: {:?}", t.shell_lines);
+    }
+
+    #[test]
+    fn terminal_session_history_supports_navigation() {
+        // Simula o registro de comandos executados na sessão (ocorre no Enter) e
+        // valida que Up/Down navegam pelo histórico local.
+        let mut app = Application::terminal_window(
+            "Term",
+            Window::new(4, 4, 60, 25, 0),
+            ".".to_string(),
+            Vec::new(),
+        );
+        let t = app.terminal.as_mut().unwrap();
+
+        // Dois comandos executados.
+        for cmd in ["echo first_cmd", "echo second_cmd"] {
+            t.commands.push(CommandEntry::completed(cmd, &t.path, Vec::new()));
+        }
+
+        let mut input = String::new();
+        let mut index = None;
+        let mut draft = None;
+
+        assert!(input::history_up(&t.commands, &mut input, &mut index, &mut draft));
+        assert_eq!(input, "echo second_cmd");
+        assert!(input::history_up(&t.commands, &mut input, &mut index, &mut draft));
+        assert_eq!(input, "echo first_cmd");
+        assert!(input::history_down(&t.commands, &mut input, &mut index, &mut draft));
+        assert_eq!(input, "echo second_cmd");
+    }
+
+    #[test]
+    fn interactive_command_rewrites_bare_python() {
+        assert_eq!(interactive_command("python"), "python -i");
+        assert_eq!(interactive_command("python3"), "python3 -i");
+        assert_eq!(interactive_command("python2"), "python2 -i");
+        assert_eq!(interactive_command("python script.py"), "python script.py");
+        assert_eq!(interactive_command("dir"), "dir");
+    }
+
+    #[test]
+    fn python_opens_through_session() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let mut app = Application::terminal_window("Term", Window::new(4, 4, 60, 25, 0), cwd.clone(), Vec::new());
+        let t = app.terminal.as_mut().unwrap();
+        assert!(t.has_session());
+
+        // Abre o python (reescrito para `python -i` no Enter).
+        let rev = interactive_command("python");
+        let line = format!("{}\r\n", rev);
+        if let Some(ref mut session) = t.shell_session {
+            session.write(line.as_bytes());
+        }
+
+        // O python deve (a) abrir (banner) e (b) continuar a aceitar linhas.
+        let start = Instant::now();
+        let mut saw_banner = false;
+        while start.elapsed() < Duration::from_secs(6) {
+            if let Some(session) = t.shell_session.as_mut() {
+                let poll = session.poll();
+                for l in poll.lines {
+                    if l.contains("Python") && l.contains("on win32") {
+                        saw_banner = true;
+                    }
+                }
+            }
+            if saw_banner { break; }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(saw_banner, "python não abriu (sem banner)");
+
+        // O input deve chegar ao python (final de linha \r\n agora).
+        if let Some(ref mut session) = t.shell_session {
+            let line = "print('PY_APP_MARK_69')\r\n".to_string();
+            session.write(line.as_bytes());
+        }
+        let start = Instant::now();
+        let mut saw_mark = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            if let Some(session) = t.shell_session.as_mut() {
+                let poll = session.poll();
+                for l in poll.lines {
+                    if l.contains("PY_APP_MARK_69") {
+                        saw_mark = true;
+                    }
+                }
+            }
+            if saw_mark { break; }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(saw_mark, "python não executou a linha enviada");
+    }
+
+    #[test]
+    fn terminal_window_with_history_preserves_it() {
+        // Ctrl+Enter: o terminal próprio deve preservar o histórico do dock.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let commands = vec![
+            CommandEntry::completed("cd xphmg", &cwd, vec!["erro: diretório não existe".to_string()]),
+            CommandEntry::completed("flutter --version", &cwd, vec!["Flutter 3.32.8 stable".to_string()]),
+        ];
+        let app = Application::terminal_window("Term", Window::new(4, 4, 60, 25, 0), cwd, commands);
+        let t = app.terminal.as_ref().unwrap();
+        assert!(t.has_session(), "deveria ter sessão");
+        assert!(
+            t.shell_lines.iter().any(|l| l.contains("cd xphmg")),
+            "histórico perdido: {:#?}",
+            t.shell_lines
+        );
+        assert!(
+            t.shell_lines.iter().any(|l| l.contains("Flutter")),
+            "saída do histórico perdida: {:#?}",
+            t.shell_lines
+        );
+    }
+
+    #[test]
+    fn terminal_session_roundtrips_unicode() {
+        let mut app = Application::terminal_window(
+            "Term",
+            Window::new(4, 4, 60, 25, 0),
+            ".".to_string(),
+            Vec::new(),
+        );
+        let t = app.terminal.as_mut().unwrap();
+
+        let cmd = "echo manto_çãẽ_ñ".to_string();
+        t.push_shell_line(cmd.clone());
+        if let Some(ref mut session) = t.shell_session {
+            let line = format!("{}\r", cmd);
+            session.write(line.as_bytes());
+        }
+
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut saw = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            t.tick();
+            if t.shell_lines.iter().filter(|l| l.contains("çãẽ")).count() >= 2 {
+                saw = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(saw, "unicode did not round-trip: {:?}", t.shell_lines);
+    }
+
+    fn strip_sgr(seg: &str) -> String {
+        let mut out = String::new();
+        let bytes = seg.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                // pula até a letra final (m, H, etc.)
+                if let Some(rel) = bytes[i + 2..].iter().position(|&b| b.is_ascii_alphabetic()) {
+                    i += 2 + rel + 1;
+                    continue;
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    fn out_of_bounds_moves(buf: &[u8], w: u16, h: u16) -> Vec<(u16, u16)> {
+        let bytes = buf;
+        let mut bad = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                if let Some(rel) = bytes[i + 2..].iter().position(|&b| b == b'H') {
+                    let seg = String::from_utf8_lossy(&bytes[i + 2..i + 2 + rel]).into_owned();
+                    let clean = strip_sgr(&seg);
+                    if let Some((r, c)) = clean.split_once(';') {
+                        if let (Ok(row), Ok(col)) = (r.trim().parse::<u16>(), c.trim().parse::<u16>()) {
+                            // move_to emite (y+1, x+1); valida dentro da tela.
+                            if row == 0 || row > h || col == 0 || col > w {
+                                bad.push((row, col));
+                            }
+                        }
+                    }
+                    i += 2 + rel + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        bad
+    }
+
+    #[test]
+    fn render_with_new_maximized_terminal_stays_in_bounds() {
+        let w: u16 = 100;
+        let h: u16 = 30;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+
+        // Terminal maximizado (cobre a área útil) + um terminal normal.
+        let mut applications = vec![
+            Application::terminal_window("Terminal 1", Window::new(2, 1, w - 5, h - 4, 0), cwd.clone(), Vec::new()),
+            Application::terminal_window("Terminal 2", Window::new(10, 4, 50, 18, 0), cwd.clone(), Vec::new()),
+        ];
+
+        // Enche a sessão com muitas linhas para exercitar scrollbar/scroll.
+        assert!(applications[0].terminal.as_ref().unwrap().has_session());
+        for i in 0..500 {
+            applications[0].terminal.as_mut().unwrap()
+                .push_shell_line(format!("linha de saída do shell número {i} com conteúdo acentuado çã"));
+        }
+        applications[0].terminal.as_mut().unwrap().panel_scroll = 120;
+        applications[1].terminal.as_mut().unwrap()
+            .push_shell_line("poucas linhas".to_string());
+
+        let pointer = Pointer::new(20, 10);
+        let focused_term = Some((0, "", 0));
+        let mut buf = Vec::new();
+        render(
+            &mut buf,
+            &applications,
+            None, None, w, h,
+            &pointer, 0, 0, "", None, &[], 0, 1, focused_term,
+        );
+
+        let bad = out_of_bounds_moves(&buf, w, h);
+        assert!(bad.is_empty(), "render escreveu fora da tela: {bad:?}");
+    }
+
+    #[test]
+    fn render_with_terminal_near_bottom_stays_in_bounds() {
+        let w: u16 = 80;
+        let h: u16 = 24;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        // Janela de terminal encostada na parte inferior (status bar em h-4..h-1).
+        let applications = vec![
+            Application::terminal_window(
+                "Terminal bottom",
+                Window::new(2, h - 8, 40, 6, 0),
+                cwd.clone(),
+                Vec::new(),
+            ),
+        ];
+        assert!(applications[0].terminal.as_ref().unwrap().has_session());
+        let pointer = Pointer::new(20, 10);
+        let mut buf = Vec::new();
+        render(
+            &mut buf,
+            &applications,
+            None, None, w, h,
+            &pointer, 0, 0, "", None, &[], 0, 1, None,
+        );
+        let bad = out_of_bounds_moves(&buf, w, h);
+        assert!(bad.is_empty(), "render escreveu fora da tela: {bad:?}");
     }
 }

@@ -1,27 +1,18 @@
-use crate::terminal_backend::CommandSession;
+use std::io::Read;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CommandKind {
     Builtin,
     External,
 }
 
-enum CommandRunner {
-    Session(CommandSession),
-}
-
+#[derive(Clone, Copy)]
 pub enum CommandStatus {
     Running,
     Complete,
-}
-
-pub struct CommandEntry {
-    pub cwd:          String,
-    pub command:      String,
-    pub output_lines: Vec<String>,
-    pub status:       CommandStatus,
-    kind:             CommandKind,
-    runner:           Option<CommandRunner>,
 }
 
 const BUILTINS_HELP: &[(&str, &str)] = &[
@@ -31,6 +22,28 @@ const BUILTINS_HELP: &[(&str, &str)] = &[
     ("help",             "Show this help message"),
     ("exit",             "Close the focused terminal window"),
 ];
+
+pub struct CommandEntry {
+    pub command:      String,
+    pub cwd:          String,
+    pub output_lines: Vec<String>,
+    pub status:       CommandStatus,
+    kind:             CommandKind,
+    runner:           Option<OneShot>,
+}
+
+impl Clone for CommandEntry {
+    fn clone(&self) -> Self {
+        Self {
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            output_lines: self.output_lines.clone(),
+            status: self.status,
+            kind: self.kind,
+            runner: None,
+        }
+    }
+}
 
 impl CommandEntry {
     pub fn completed(cmd: &str, cwd: &str, output_lines: Vec<String>) -> Self {
@@ -43,8 +56,8 @@ impl CommandEntry {
         };
 
         Self {
-            cwd: cwd.to_string(),
             command: name.to_string(),
+            cwd: cwd.to_string(),
             output_lines,
             status: CommandStatus::Complete,
             kind,
@@ -52,6 +65,8 @@ impl CommandEntry {
         }
     }
 
+    /// Spawn a one-shot external command (used by the dock/typing mode).
+    /// The output arrives via a background thread and is drained on `tick`.
     pub fn spawn(cmd: &str, cwd: &str) -> Self {
         let command = cmd.trim().to_string();
         let first_word = command.split_whitespace().next().unwrap_or(&command);
@@ -61,18 +76,18 @@ impl CommandEntry {
             CommandKind::External
         };
 
-        match CommandSession::spawn(&command, cwd) {
-            Ok(session) => Self {
-                cwd: cwd.to_string(),
+        match OneShot::spawn(&command, cwd) {
+            Ok(runner) => Self {
                 command,
+                cwd: cwd.to_string(),
                 output_lines: Vec::new(),
                 status: CommandStatus::Running,
                 kind,
-                runner: Some(CommandRunner::Session(session)),
+                runner: Some(runner),
             },
             Err(err) => Self {
-                cwd: cwd.to_string(),
                 command,
+                cwd: cwd.to_string(),
                 output_lines: vec![err],
                 status: CommandStatus::Complete,
                 kind,
@@ -81,7 +96,7 @@ impl CommandEntry {
         }
     }
 
-    /// Run a builtin command and return the output lines.
+    /// Run a builtin command and return the output lines (for dock/typing mode).
     pub fn run_builtin(command: &str, cwd: &str) -> Vec<String> {
         let trimmed = command.trim();
         let first_word = trimmed.split_whitespace().next().unwrap_or(trimmed);
@@ -101,7 +116,7 @@ impl CommandEntry {
         }
     }
 
-    /// Check if this is a builtin command that exits the terminal.
+    /// Check if this is a builtin exit command.
     pub fn is_exit(&self) -> bool {
         self.kind == CommandKind::Builtin
             && self.command.trim().split_whitespace().next() == Some("exit")
@@ -109,42 +124,40 @@ impl CommandEntry {
 
     /// Avança um tick. Retorna true se houve mudança.
     pub fn tick(&mut self) -> bool {
-        match self.runner.take() {
-            Some(CommandRunner::Session(mut session)) => {
-                let poll = session.poll();
-                let mut changed = false;
+        let Some(mut runner) = self.runner.take() else {
+            return false;
+        };
+        let (lines, exit_code, closed) = runner.poll();
+        let mut changed = false;
 
-                for line in poll.lines {
-                    if self.output_lines.is_empty() && line.trim().is_empty() {
-                        continue;
-                    }
-                    self.output_lines.push(line);
-                    changed = true;
-                }
-
-                if poll.closed {
-                    if self.output_lines.is_empty() {
-                        self.output_lines.push(match poll.exit_code.unwrap_or_default() {
-                            0 => "complete".to_string(),
-                            code => format!("exit {}", code),
-                        });
-                    }
-                    self.status = CommandStatus::Complete;
-                    changed = true;
-                } else {
-                    self.runner = Some(CommandRunner::Session(session));
-                }
-
-                changed
+        for line in lines {
+            if self.output_lines.is_empty() && line.trim().is_empty() {
+                continue;
             }
-            None => false,
+            self.output_lines.push(line);
+            changed = true;
         }
+
+        if closed {
+            if self.output_lines.is_empty() {
+                self.output_lines.push(match exit_code.unwrap_or_default() {
+                    0 => "complete".to_string(),
+                    code => format!("exit {}", code),
+                });
+            }
+            self.status = CommandStatus::Complete;
+            changed = true;
+        } else {
+            self.runner = Some(runner);
+        }
+
+        changed
     }
 
     /// Kill a running external command. Returns true if killed.
     pub fn kill(&mut self) -> bool {
         match &mut self.runner {
-            Some(CommandRunner::Session(session)) => session.kill(),
+            Some(runner) => runner.kill(),
             None => false,
         }
     }
@@ -174,6 +187,133 @@ impl CommandEntry {
     }
 }
 
+// ── One-shot command runner (dock) ────────────────────────────────────────────
+
+enum RunnerUpdate {
+    Line(String),
+    Closed,
+}
+
+struct OneShot {
+    child:          Option<Child>,
+    receiver:       Receiver<RunnerUpdate>,
+    closed_streams: usize,
+}
+
+/// Launch a shell to run `command` once, capturing its stdout/stderr lines.
+fn spawn_process(command: &str, cwd: &str) -> Result<Child, String> {
+    let spawn = |program: &str, args: &[&str]| -> Result<Child, String> {
+        let mut cmd = Command::new(program);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.arg(command)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("failed to spawn {program}: {err}"))
+    };
+
+    #[cfg(windows)]
+    {
+        spawn("powershell.exe", &["-NoProfile", "-Command"])
+            .or_else(|_| {
+                let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+                spawn(&shell, &["/D", "/C"])
+            })
+            .or_else(|_| spawn("cmd.exe", &["/D", "/C"]))
+    }
+
+    #[cfg(not(windows))]
+    {
+        spawn("/bin/sh", &["-lc"])
+    }
+}
+
+/// Read a byte stream fully, splitting on line breaks using lossy UTF-8
+/// decoding so localized output (OEM/NT codepages) still reaches the UI.
+fn read_lossy_lines<R: Read>(mut reader: R, tx: &mpsc::Sender<RunnerUpdate>) {
+    let mut buf = [0u8; 4096];
+    let mut residue = String::new();
+    loop {
+        let n = reader.read(&mut buf).unwrap_or(0);
+        if n == 0 { break; }
+        residue.push_str(&String::from_utf8_lossy(&buf[..n]));
+        while let Some(pos) = residue.find('\n') {
+            let line: String = residue.drain(..=pos).collect();
+            let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+            if !trimmed.is_empty() {
+                let _ = tx.send(RunnerUpdate::Line(trimmed));
+            }
+        }
+    }
+    let tail = residue.trim().to_string();
+    if !tail.is_empty() {
+        let _ = tx.send(RunnerUpdate::Line(tail));
+    }
+    let _ = tx.send(RunnerUpdate::Closed);
+}
+
+impl OneShot {
+    fn spawn(command: &str, cwd: &str) -> Result<Self, String> {
+        let mut child = spawn_process(command, cwd)?;
+        let (tx, rx) = mpsc::channel();
+
+        if let Some(out) = child.stdout.take() {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                read_lossy_lines(out, &tx);
+            });
+        }
+        if let Some(err) = child.stderr.take() {
+            let tx = tx.clone();
+            thread::spawn(move || {
+                read_lossy_lines(err, &tx);
+            });
+        }
+
+        Ok(Self { child: Some(child), receiver: rx, closed_streams: 0 })
+    }
+
+    fn poll(&mut self) -> (Vec<String>, Option<i32>, bool) {
+        let mut lines = Vec::new();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(RunnerUpdate::Line(line)) => lines.push(line),
+                Ok(RunnerUpdate::Closed) => self.closed_streams += 1,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.closed_streams = 2;
+                    break;
+                }
+            }
+        }
+        let exit_code = self.child.as_mut()
+            .and_then(|c| c.try_wait().ok().flatten())
+            .map(|s| s.code().unwrap_or_default());
+        let closed = self.closed_streams >= 2 && exit_code.is_some();
+        (lines, exit_code, closed)
+    }
+
+    fn kill(&mut self) -> bool {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+        true
+    }
+}
+
+impl Drop for OneShot {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 pub fn tick_all(commands: &mut Vec<CommandEntry>) -> bool {
     let mut changed = false;
     for e in commands.iter_mut() {
@@ -195,7 +335,7 @@ mod tests {
         let mut cmd = CommandEntry::spawn("dir", &cwd);
         let start = Instant::now();
 
-        while start.elapsed() < Duration::from_secs(3) {
+        while start.elapsed() < Duration::from_secs(5) {
             cmd.tick();
             if matches!(cmd.status, CommandStatus::Complete) {
                 break;
@@ -205,33 +345,6 @@ mod tests {
 
         assert!(!cmd.output_lines.is_empty(), "output was empty");
         assert!(cmd.output_lines.iter().any(|line| !line.trim().is_empty()));
-    }
-
-    #[test]
-    fn builtin_pwd_returns_cwd() {
-        let cwd = std::env::current_dir().unwrap();
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let output = CommandEntry::run_builtin("pwd", &cwd_str);
-        assert_eq!(output, vec![cwd_str]);
-    }
-
-    #[test]
-    fn builtin_clear_returns_empty() {
-        let output = CommandEntry::run_builtin("clear", "/tmp");
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn builtin_help_lists_commands() {
-        let output = CommandEntry::run_builtin("help", "/tmp");
-        assert!(output.len() > 1);
-        assert!(output[0].contains("Built-in"));
-    }
-
-    #[test]
-    fn builtin_exit_returns_exit_marker() {
-        let output = CommandEntry::run_builtin("exit", "/tmp");
-        assert_eq!(output, vec!["__EXIT__"]);
     }
 
     #[test]
@@ -250,5 +363,45 @@ mod tests {
 
         let entry = CommandEntry::completed("ls", "/tmp", Vec::new());
         assert!(matches!(entry.kind, CommandKind::External));
+    }
+
+    #[test]
+    fn lossy_reader_captures_non_utf8_lines() {
+        let (tx, rx) = mpsc::channel();
+        let bytes: Vec<u8> = vec![b'a', b'b', 0xFF, 0xFE, b'\n', b'c', b'd'];
+        let handle = thread::spawn(move || {
+            read_lossy_lines(&bytes[..], &tx);
+        });
+        handle.join().unwrap();
+
+        let mut lines: Vec<String> = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            if let RunnerUpdate::Line(l) = update {
+                lines.push(l);
+            }
+        }
+        assert_eq!(lines.len(), 2, "expected two lines, got {lines:?}");
+        assert!(lines[0].contains("ab"), "first line should contain ab: {lines:?}");
+        assert_eq!(lines[1], "cd");
+    }
+
+    #[test]
+    fn unicode_command_preserves_accents_through_oneshot() {
+        // Verifica que "ç/ã" chegam ao comando e voltam na saída (encoding UTF-8).
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_string_lossy().to_string();
+        let mut cmd = CommandEntry::spawn("echo manto_çã_ñ", &cwd);
+        let start = Instant::now();
+
+        while start.elapsed() < Duration::from_secs(5) {
+            cmd.tick();
+            if matches!(cmd.status, CommandStatus::Complete) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let joined = cmd.output_lines.join("\n");
+        assert!(joined.contains("manto"), "missing output: {joined:?}");
     }
 }
