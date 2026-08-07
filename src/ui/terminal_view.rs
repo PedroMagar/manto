@@ -210,3 +210,81 @@ pub fn draw_shell_content(
     ansi::move_to(out, lx + 1, input_y);
     write!(out, "{}{:<width$}", prefix, "", width = inner_w.saturating_sub(prefix_len)).unwrap();
 }
+
+/// Render an interactive terminal's emulator grid into the window interior.
+/// `panel_scroll > 0` scrolls the viewport up into the scrollback; the cursor
+/// cell is emphasized when `show_cursor`.
+pub fn draw_emulator_content(
+    out: &mut impl Write,
+    win: &Window,
+    term: &crate::terminal_emulator::Terminal,
+    panel_scroll: usize,
+    show_cursor: bool,
+) {
+    use crate::terminal_emulator::{Attributes, Style};
+
+    if win.height < 5 { return; }
+
+    let lx = win.position_x;
+    let ty = win.position_y;
+    let inner_w = (win.width - 2) as usize;
+    let inner_h = (win.height - 2) as usize;
+    let cols = (term.cols() as usize).min(inner_w);
+    let rows = (term.rows() as usize).min(inner_h);
+    if cols == 0 || rows == 0 { return; }
+
+    let total = term.total_lines();
+    let visible = rows;
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = panel_scroll.min(max_scroll);
+    let view_top_abs = total - visible - scroll;
+
+    for row in 0..visible {
+        let abs = view_top_abs + row;
+        let line = term.line_at(abs);
+        ansi::move_to(out, lx + 1, ty + 1 + row as u16);
+
+        let mut prev_style: Option<Style> = None;
+        for col in 0..cols {
+            let cell = line[col];
+            ansi::sgr(out, prev_style.as_ref(), &cell.style);
+            prev_style = Some(cell.style);
+            write!(out, "{}", cell.ch).unwrap();
+        }
+        // Pad the rest of the window width with default style.
+        ansi::sgr(out, prev_style.as_ref(), &Style::default());
+        for _ in cols..inner_w {
+            write!(out, " ").unwrap();
+        }
+    }
+
+    // Clear window interior rows below the emulator height (if any).
+    for i in rows..inner_h {
+        ansi::move_to(out, lx + 1, ty + 1 + i as u16);
+        write!(out, "{:<width$}", "", width = inner_w).unwrap();
+    }
+
+    // Emulator cursor, when visible in the current viewport.
+    if show_cursor && term.cursor_visible() {
+        let (cx, cy) = term.cursor_pos();
+        let cursor_abs = term.scrollback_len() + cy as usize;
+        if (cx as usize) < cols && cursor_abs >= view_top_abs && cursor_abs < view_top_abs + visible {
+            let vrow = cursor_abs - view_top_abs;
+            let cell = term.line_at(cursor_abs)[cx as usize];
+            let mut cursor_style = cell.style;
+            cursor_style.attrs.set(Attributes::REVERSE, true);
+            cursor_style.attrs.set(Attributes::BOLD, true);
+            ansi::move_to(out, lx + 1 + cx as u16, ty + 1 + vrow as u16);
+            ansi::sgr(out, None, &cursor_style);
+            write!(out, "{}", cell.ch).unwrap();
+            ansi::sgr(out, Some(&cursor_style), &Style::default());
+        }
+    }
+
+    if max_scroll > 0 {
+        let sb_x = lx + inner_w as u16;
+        // draw_scrollbar expects scroll "from the top"; panel_scroll is
+        // "how far up from the end", so it is inverted here.
+        draw_scrollbar(out, sb_x, ty + 1, ty + inner_h as u16, total, visible, max_scroll.saturating_sub(scroll));
+    }
+}

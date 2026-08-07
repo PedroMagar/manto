@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use super::terminal::{interactive_command, is_repl_exit};
+use super::terminal::{interactive_command, is_interactive_app, is_repl_exit, split_interactive_flag};
 use super::Application;
 use crate::cmd::{tick_all, CommandEntry};
 use crate::input::{self, History};
@@ -16,9 +16,9 @@ use crate::wm::{self, apply_resize_edit, bring_window_to_front, close_active_win
                 enter_active_resize_mode, focus_relative_window, max_tab_scroll,
                 minimize_active_window, move_active_window_to_desktop, normalize_host_path,
                 place_pointer_on_terminal_input, push_shell_command, resolve_snap_region,
-                snap_active_window, spawn_terminal_window, split_active_terminal_window,
-                sync_terminal_window_metrics, tab_layout, toggle_active_maximize,
-                toggle_start_menu, topmost_window_at, Mode, ResizeEditState};
+                snap_active_window, spawn_interactive_terminal, spawn_terminal_window,
+                split_active_terminal_window, sync_terminal_window_metrics, tab_layout,
+                toggle_active_maximize, toggle_start_menu, topmost_window_at, Mode, ResizeEditState};
 
 pub struct Desktop {
     pub mode: Mode,
@@ -201,6 +201,18 @@ impl Desktop {
     }
 
     fn handle_key(&mut self, key: Key) -> bool {
+        // Interactive terminals forward every key raw to the session (except
+        // Esc/End -> desktop, Ctrl+Delete -> quit handled in step_input).
+        if let Mode::TerminalFocus { app_idx } = &self.mode {
+            let app_idx = *app_idx;
+            if self.applications.get(app_idx)
+                .and_then(|a| a.terminal.as_ref())
+                .map_or(false, |t| t.interactive)
+            {
+                return self.key_interactive(app_idx, key);
+            }
+        }
+
         let mut mode_changed = false;
 
         match key {
@@ -647,7 +659,41 @@ impl Desktop {
             Key::Enter => {
                 let trimmed = self.cmd_input.trim().to_string();
                 if !trimmed.is_empty() {
-                    push_shell_command(&mut self.commands, &mut self.current_path, &trimmed);
+                    let (command, flagged) = split_interactive_flag(&trimmed);
+                    let program_hint = command.split_whitespace().next().unwrap_or("").to_string();
+                    let interactive = flagged || (!command.is_empty() && is_interactive_app(&program_hint));
+
+                    // `#i app` (or an interactive-list app) opens an interactive terminal
+                    // running the program; a bare `#i` opens the default shell interactively.
+                    let interactive_program: Option<String> = if flagged && command.is_empty() {
+                        Some(crate::app::terminal::default_shell())
+                    } else if interactive && !command.is_empty() {
+                        Some(command.clone())
+                    } else {
+                        None
+                    };
+
+                    if let Some(program) = interactive_program {
+                        let app_idx = spawn_interactive_terminal(
+                            &mut self.applications,
+                            &mut self.next_terminal_id,
+                            self.current_desktop,
+                            self.last_size.0,
+                            self.last_size.1,
+                            &self.current_path,
+                            &program,
+                        );
+                        place_pointer_on_terminal_input(
+                            &mut self.pointer,
+                            &self.applications,
+                            app_idx,
+                            self.last_size.0,
+                            self.last_size.1,
+                        );
+                        self.mode = Mode::TerminalFocus { app_idx };
+                    } else {
+                        push_shell_command(&mut self.commands, &mut self.current_path, &trimmed);
+                    }
                     self.history.append(&trimmed);
                     self.cmd_input.clear();
                     self.cmd_cursor = 0;
@@ -1000,6 +1046,53 @@ impl Desktop {
             }
         }
         mode_changed
+    }
+
+    /// Interactive passthrough: every key forwards raw to the session except
+    /// Esc/End (leave to the desktop) and PageUp/PageDown (Manto scrollback).
+    /// Ctrl+Delete quits globally in `step_input` before this runs.
+    fn key_interactive(&mut self, app_idx: usize, key: Key) -> bool {
+        match key {
+            Key::Escape | Key::End => {
+                self.mode = Mode::Normal;
+                true
+            }
+            Key::PageUp | Key::PageDown => {
+                // Scroll Manto's scrollback view; the app never sees these.
+                if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                    match key {
+                        Key::PageUp => t.panel_scroll = t.panel_scroll.saturating_add(1),
+                        _ => t.panel_scroll = t.panel_scroll.saturating_sub(1),
+                    }
+                }
+                true
+            }
+            _ => {
+                let is_enter = matches!(key, Key::Enter | Key::CtrlEnter);
+                let bytes = crate::app::terminal::key_to_bytes(key);
+                if let Some(bytes) = bytes {
+                    if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                        let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
+                        // Piped fallback has no real echo: mirror typed input
+                        // into the emulator so it stays visible.
+                        if !is_pty {
+                            if let Some(em) = t.emulator.as_mut() {
+                                if is_enter {
+                                    em.process(b"\r\n");
+                                } else {
+                                    em.process(&bytes);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = t.shell_session {
+                            let _ = s.write(&bytes);
+                        }
+                    }
+                }
+                // Redraw: the app may repaint even when the key maps to nothing.
+                true
+            }
+        }
     }
 }
 

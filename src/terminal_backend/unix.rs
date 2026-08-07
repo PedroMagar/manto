@@ -66,14 +66,6 @@ fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
     }
 }
 
-/// Is there data available to read on the fd right now (non-blocking poll)?
-fn unix_fd_has_data(fd: RawFd) -> bool {
-    unsafe {
-        let mut fds = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        libc::poll(&mut fds, 1, 0) > 0 && (fds.revents & libc::POLLIN) != 0
-    }
-}
-
 // ── Platform state ────────────────────────────────────────────────────────────
 
 pub struct PlatformCommand {
@@ -123,6 +115,10 @@ impl PlatformCommand {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
         pty_set_size(self.master_fd, rows, cols);
         Ok(())
+    }
+
+    pub fn is_real_pty(&self) -> bool {
+        true
     }
 }
 
@@ -239,10 +235,10 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
         }
     });
 
-    // Output reading thread with partial-line buffering.
+    // Output reader thread: forwards raw bytes.
+    let tx_out = tx.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        let mut residue = String::new();
         loop {
             unsafe {
                 let ret = libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
@@ -250,29 +246,12 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
                     break;
                 }
                 let n = ret as usize;
-                residue.push_str(&String::from_utf8_lossy(&buf[..n]));
-            }
-            while let Some(pos) = residue.find('\n') {
-                let line: String = residue.drain(..=pos).collect();
-                let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-                if !trimmed.is_empty() {
-                    let _ = tx.send(TerminalUpdate::Line(trimmed));
+                if tx_out.send(TerminalUpdate::Output(buf[..n].to_vec())).is_err() {
+                    break;
                 }
             }
-            // Stabilized partial output (e.g. a ">>> " prompt): when no more
-            // data is imminent on the PTY, emit now instead of waiting for '\n'.
-            if !residue.trim().is_empty() && !unix_fd_has_data(master_fd) {
-                let part = residue.trim_end().to_string();
-                if !part.is_empty() {
-                    let _ = tx.send(TerminalUpdate::Line(part));
-                }
-                residue.clear();
-            }
         }
-        if !residue.trim().is_empty() {
-            let _ = tx.send(TerminalUpdate::Line(residue.trim().to_string()));
-        }
-        let _ = tx.send(TerminalUpdate::Closed);
+        let _ = tx_out.send(TerminalUpdate::Closed);
     });
 
     Ok(PlatformCommand {

@@ -63,6 +63,33 @@ impl Application {
         }
     }
 
+    /// Create an interactive terminal window running `program` directly in a
+    /// PTY/ConPTY session: the emulator grid renders its output and keys are
+    /// forwarded raw.
+    pub fn interactive_terminal_window(
+        title: impl Into<String>,
+        window: Window,
+        path: String,
+        program: &str,
+    ) -> Self {
+        match TerminalState::with_program(path.clone(), program) {
+            Ok(ts) => Self {
+                title:    title.into(),
+                display:  DisplayMode::Windowed(window),
+                desktop:  1,
+                is_menu:  false,
+                terminal: Some(ts),
+            },
+            Err(_) => Self {
+                title:    title.into(),
+                display:  DisplayMode::Windowed(window),
+                desktop:  1,
+                is_menu:  false,
+                terminal: Some(TerminalState::new(path, Vec::new())),
+            },
+        }
+    }
+
     pub fn with_desktop(mut self, desktop: usize) -> Self {
         self.desktop = desktop;
         self

@@ -5,8 +5,9 @@ use super::ansi;
 use super::pointer::Pointer;
 use super::window::{MIN_W, MIN_H};
 use super::{desktop_at, draw_command_panel, draw_desktop, draw_scrollbar, draw_status_bar,
-            draw_tab, draw_terminal_content, draw_shell_content, scrollbar_thumb, tab_char_at,
-            CMD_INPUT_X, DESKTOP_AREA_LEN, STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
+            draw_tab, draw_emulator_content, draw_shell_content, draw_terminal_content,
+            scrollbar_thumb, tab_char_at, CMD_INPUT_X, DESKTOP_AREA_LEN, STATUS_START,
+            STATUS_START_X, TERMINAL_INPUT_PREFIX};
 use crate::app::Application;
 use crate::cmd::CommandEntry;
 use crate::input;
@@ -33,12 +34,16 @@ pub fn render<W: std::io::Write>(
 
     draw_desktop(out, 1, w, h, "Manto");
 
-    for app in applications {
+    for (app_idx, app) in applications.iter().enumerate() {
         if app.on_desktop(current_desktop) {
             if let Some(win) = app.window() {
                 win.draw(out, &app.title);
                 if let Some(term) = app.terminal.as_ref() {
-                    if term.shell_session.is_some() {
+                    if let Some(em) = term.emulator.as_ref() {
+                        // Interactive terminal: full emulator grid + cursor.
+                        let focused = focused_terminal.map(|(i, _, _)| i) == Some(app_idx);
+                        draw_emulator_content(out, win, em, term.panel_scroll, focused);
+                    } else if term.shell_session.is_some() {
                         draw_shell_content(out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
                     } else {
                         draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
@@ -99,7 +104,13 @@ pub fn render<W: std::io::Write>(
         ansi::move_to(out, CMD_INPUT_X + cursor_col as u16, h - 2);
         ansi::show_cursor(out);
     } else if let Some((term_idx, term_input, cursor_pos)) = focused_terminal {
-        if let Some(win) = applications.get(term_idx)
+        let interactive_mode = applications.get(term_idx)
+            .and_then(|a| a.terminal.as_ref())
+            .map_or(false, |t| t.interactive);
+        if interactive_mode {
+            // Interactive terminals draw their own cursor in the grid.
+            ansi::hide_cursor(out);
+        } else if let Some(win) = applications.get(term_idx)
             .filter(|a| a.on_desktop(current_desktop))
             .and_then(|a| a.window())
         {
@@ -306,6 +317,46 @@ mod tests {
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, None,
+        );
+        let bad = out_of_bounds_moves(&buf, w, h);
+        assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");
+    }
+
+    #[test]
+    fn render_interactive_emulator_stays_in_bounds() {
+        use crate::app::terminal::TerminalState;
+        use crate::app::DisplayMode;
+        use crate::terminal_emulator::Terminal;
+
+        let w: u16 = 100;
+        let h: u16 = 30;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+
+        // Build an interactive terminal without spawning a real session.
+        let mut ts = TerminalState::new(cwd, Vec::new());
+        ts.interactive = true;
+        let mut em = Terminal::new(80, 24);
+        for i in 0..300 {
+            em.process(format!("linha de saída {i} com conteúdo acentuado çãẽ\r\n").as_bytes());
+        }
+        ts.emulator = Some(em);
+        ts.panel_scroll = 12;
+
+        let applications = vec![Application {
+            title: "App".to_string(),
+            display: DisplayMode::Windowed(Window::new(2, 2, 80, 24, 0)),
+            desktop: 1,
+            is_menu: false,
+            terminal: Some(ts),
+        }];
+
+        let pointer = Pointer::new(20, 10);
+        let mut buf = Vec::new();
+        render(
+            &mut buf,
+            &applications,
+            None, None, w, h,
+            &pointer, 0, 0, "", None, &[], 0, 1, Some((0, "", 0)),
         );
         let bad = out_of_bounds_moves(&buf, w, h);
         assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");

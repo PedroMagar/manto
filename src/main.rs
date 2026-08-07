@@ -8,6 +8,7 @@ mod cmd;
 mod input;
 mod os;
 mod terminal_backend;
+mod terminal_emulator;
 mod ui;
 mod wm;
 

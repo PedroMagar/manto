@@ -11,7 +11,7 @@ mod terminal_view;
 
 pub use panel::draw_command_panel;
 pub use render::{compute_render_state, render};
-pub use terminal_view::{draw_shell_content, draw_terminal_content, terminal_content_width};
+pub use terminal_view::{draw_emulator_content, draw_shell_content, draw_terminal_content, terminal_content_width};
 
 use std::io::Write;
 

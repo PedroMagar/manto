@@ -87,10 +87,46 @@ unsafe extern "system" {
         value: *mut u8, size: usize, prev: *mut u8, ret_size: *mut u8,
     ) -> Bool;
     fn DeleteProcThreadAttributeList(attr: *mut u8);
-    fn PeekNamedPipe(
-        h: Handle, buf: *mut u8, n: Dword,
-        read: *mut Dword, avail: *mut Dword, left: *mut Dword,
-    ) -> Bool;
+    fn MultiByteToWideChar(
+        code_page: Dword, flags: Dword,
+        multi: *const u8, multi_len: i32,
+        wide: *mut u16, wide_len: i32,
+    ) -> i32;
+}
+
+const CP_OEMCP: Dword = 1;
+
+/// Decode Windows child output (console/OEM codepage) to UTF-8. Bytes that are
+/// already valid UTF-8 pass through unchanged.
+fn oem_to_utf8(bytes: &[u8]) -> Vec<u8> {
+    if std::str::from_utf8(bytes).is_ok() {
+        return bytes.to_vec();
+    }
+    unsafe {
+        let n = MultiByteToWideChar(
+            CP_OEMCP, 0, bytes.as_ptr() as *const u8, bytes.len() as i32,
+            std::ptr::null_mut(), 0,
+        );
+        if n <= 0 {
+            return bytes.to_vec();
+        }
+        let mut wide = vec![0u16; n as usize];
+        let out = MultiByteToWideChar(
+            CP_OEMCP, 0, bytes.as_ptr() as *const u8, bytes.len() as i32,
+            wide.as_mut_ptr(), n,
+        );
+        if out <= 0 {
+            return bytes.to_vec();
+        }
+        let mut result = Vec::with_capacity(n as usize * 2);
+        for w in wide {
+            if let Some(c) = char::from_u32(w as u32) {
+                let mut b = [0u8; 4];
+                result.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+            }
+        }
+        result
+    }
 }
 
 // ── ConPTY backend ────────────────────────────────────────────────────────────
@@ -317,14 +353,13 @@ fn try_spawn_conpty(
             }
         });
 
-        // Output reading thread with partial-line buffering.
+        // Output reader thread: forwards raw bytes.
         let out_read_usize = out_read as usize;
         let process_usize = pi.h_process as usize;
         thread::spawn(move || {
             let out_read_h = out_read_usize as Handle;
             let process_h = process_usize as Handle;
             let mut buf = [0u8; 4096];
-            let mut residue = String::new();
             loop {
                 let mut read: Dword = 0;
                 let ret = ReadFile(out_read_h, buf.as_mut_ptr(), buf.len() as Dword, &mut read, std::ptr::null_mut());
@@ -333,10 +368,10 @@ fn try_spawn_conpty(
                     std::thread::sleep(std::time::Duration::from_micros(200));
                     continue;
                 }
-                residue.push_str(&String::from_utf8_lossy(&buf[..read as usize]));
-                drain_lines(&mut residue, &tx);
+                if tx.send(TerminalUpdate::Output(oem_to_utf8(&buf[..read as usize]))).is_err() {
+                    break;
+                }
             }
-            drain_lines(&mut residue, &tx);
             let _ = tx.send(TerminalUpdate::Closed);
         });
 
@@ -364,62 +399,22 @@ unsafe fn cleanup_conpty_failed(
     close_handle(out_write);
 }
 
-/// Split complete lines out of `residue`, sending each as a TerminalUpdate::Line.
-/// Returns true if any newline-terminated line was emitted.
-fn drain_lines(residue: &mut String, tx: &Sender<TerminalUpdate>) -> bool {
-    let mut drained = false;
-    while let Some(pos) = residue.find('\n') {
-        let line: String = residue.drain(..=pos).collect();
-        let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-        if !trimmed.is_empty() {
-            let _ = tx.send(TerminalUpdate::Line(trimmed));
-        }
-        drained = true;
-    }
-    drained
-}
-
-/// Are bytes already available on the pipe without blocking? (used to decide
-/// whether a partial is a stabilized prompt that should be emitted now).
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn pipe_has_data(h: Handle) -> bool {
-    let mut avail: Dword = 0;
-    PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) != 0
-        && avail > 0
-}
-
-/// Read a byte stream lossily (accepting non-UTF-8 OEM codepages without
-/// crashing the thread) and emit one `TerminalUpdate::Line` per broken line.
-///
-/// Partial output without a newline (e.g. a `>>> ` REPL prompt) is emitted as
-/// soon as the pipe is momentarily empty (no more data imminent), avoiding it
-/// being stuck waiting for a `\n` that never comes.
-fn read_lossy_stream<R: Read>(mut stream: R, raw: Handle, tx: &Sender<TerminalUpdate>) {
+/// Forward raw bytes from a pipe/stream to the emulator exactly as read.
+/// Forward bytes from a pipe to the emulator, OEM-decoded to UTF-8. CR/LF and
+/// ANSI sequences are preserved for the parser to interpret.
+fn read_raw_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
     let mut buf = [0u8; 4096];
-    let mut residue = String::new();
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                residue.push_str(&String::from_utf8_lossy(&buf[..n]));
-                drain_lines(&mut residue, tx);
-                // Stabilized partial output: with no more data in the pipe it
-                // is a prompt/progress — emit now.
-                if !residue.trim().is_empty() && !unsafe { pipe_has_data(raw) } {
-                    let part = residue.trim_end().to_string();
-                    if !part.is_empty() {
-                        let _ = tx.send(TerminalUpdate::Line(part));
-                    }
-                    residue.clear();
+                if tx.send(TerminalUpdate::Output(oem_to_utf8(&buf[..n]))).is_err() {
+                    break;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
-    }
-    let tail = residue.trim().to_string();
-    if !tail.is_empty() {
-        let _ = tx.send(TerminalUpdate::Line(tail));
     }
 }
 
@@ -485,9 +480,8 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    // PowerShell with piped stdin is the most reliable persistent shell in a
-    // non-console host. Fall back to the requested shell if PowerShell is
-    // unavailable.
+    // PowerShell with piped stdin is the most reliable persistent session in a
+    // non-console host. Fall back to the requested shell if unavailable.
     let mut child = {
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"])
@@ -518,10 +512,6 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
     let stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
-    use std::os::windows::io::AsRawHandle;
-    // usize is Send; the raw Handle is recreated inside the threads.
-    let stdout_raw = stdout.as_raw_handle() as usize;
-    let stderr_raw = stderr.as_raw_handle() as usize;
 
     // Input forwarding thread.
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -534,17 +524,17 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
         }
     });
 
-    // stdout reader (lossy read: output may come in a non-UTF-8 OEM codepage).
+    // stdout reader (OEM-decoded byte chunks).
     let tx_out = tx.clone();
     thread::spawn(move || {
-        read_lossy_stream(stdout, stdout_raw as Handle, &tx_out);
+        read_raw_stream(stdout, &tx_out);
         let _ = tx_out.send(TerminalUpdate::Closed);
     });
 
-    // stderr reader (lossy read).
+    // stderr reader (OEM-decoded byte chunks).
     let tx_err = tx.clone();
     thread::spawn(move || {
-        read_lossy_stream(stderr, stderr_raw as Handle, &tx_err);
+        read_raw_stream(stderr, &tx_err);
         let _ = tx_err.send(TerminalUpdate::Closed);
     });
 
@@ -590,6 +580,10 @@ impl PlatformCommand {
             PlatformCommand::Conpty(s) => s.resize(cols, rows),
             PlatformCommand::Pipe(s) => s.resize(cols, rows),
         }
+    }
+
+    pub fn is_real_pty(&self) -> bool {
+        matches!(self, PlatformCommand::Conpty(_))
     }
 }
 
@@ -637,8 +631,8 @@ fn conpty_is_viable(command: &str, cwd: &str) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
     while std::time::Instant::now() < deadline {
         while let Ok(upd) = prx.try_recv() {
-            if let TerminalUpdate::Line(l) = upd {
-                if l.contains(MARKER) {
+            if let TerminalUpdate::Output(chunk) = upd {
+                if chunk.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()) {
                     return true;
                 }
             }
@@ -668,8 +662,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_lossy_stream_flushes_partial_no_newline() {
-        use std::os::windows::io::AsRawHandle;
+    fn fallback_pipe_echoes_session_output() {
+        // On a ConPTY-less host the piped fallback must still execute commands
+        // and return their output to the emulator.
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let (tx, rx) = std::sync::mpsc::channel::<TerminalUpdate>();
+        let mut s = spawn("", &cwd, tx).unwrap();
+        let _ = s.write(b"echo PIPE_PROG_77\r");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut found = false;
+        let mut collected = String::new();
+        while std::time::Instant::now() < deadline {
+            while let Ok(u) = rx.try_recv() {
+                if let TerminalUpdate::Output(chunk) = u {
+                    collected.push_str(&String::from_utf8_lossy(&chunk));
+                    if collected.contains("PIPE_PROG_77") {
+                        found = true;
+                    }
+                }
+            }
+            if found { break; }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(found, "piped fallback did not run/echo the sent command");
+    }
+
+    #[test]
+    fn raw_stream_forwards_every_byte() {
         use std::os::windows::process::CommandExt;
         use std::time::{Duration, Instant};
 
@@ -682,29 +701,29 @@ mod tests {
             .spawn()
             .expect("spawn python");
         let stdout = child.stdout.take().unwrap();
-        let raw = stdout.as_raw_handle() as usize;
         let (tx, rx) = std::sync::mpsc::channel::<TerminalUpdate>();
         thread::spawn(move || {
-            read_lossy_stream(stdout, raw as Handle, &tx);
+            read_raw_stream(stdout, &tx);
             let _ = tx.send(TerminalUpdate::Closed);
         });
 
         let deadline = Instant::now() + Duration::from_secs(3);
-        let mut lines: Vec<String> = Vec::new();
+        let mut bytes: Vec<u8> = Vec::new();
         while Instant::now() < deadline {
             while let Ok(u) = rx.try_recv() {
-                if let TerminalUpdate::Line(l) = u { lines.push(l); }
+                if let TerminalUpdate::Output(chunk) = u {
+                    bytes.extend_from_slice(&chunk);
+                }
             }
-            if lines.iter().any(|l| l.contains('X')) { break; }
+            if bytes.windows(2).any(|w| w == b"X\n") { break; }
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        // The "TAGABC" partial (no newline) must have been emitted on its
-        // own, before "X" — it cannot stay stuck nor merge into "TAGABCX".
-        assert!(
-            lines.iter().any(|l| l.contains("TAGABC") && !l.contains('X')),
-            "partial not released/merged: {lines:?}"
-        );
+        // The partial "TAGABC" must have been emitted raw (no newline inserted)
+        // and later merged with "X\n" without dropping bytes.
+        let s = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(s.contains("TAGABC"), "partial dropped: {s:?}");
+        assert!(s.contains("TAGABCX"), "chunks merged wrongly: {s:?}");
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -722,10 +741,13 @@ mod tests {
             let mut got = Vec::new();
             while start.elapsed() < std::time::Duration::from_secs(5) {
                 while let Ok(u) = rx.try_recv() {
-                    if let TerminalUpdate::Line(l) = u { got.push(l.clone()); }
-                }
-                if got.iter().any(|l| l.contains(&format!("POISONMARK{idx}"))) {
-                    return Ok(());
+                    if let TerminalUpdate::Output(chunk) = u {
+                        let s = String::from_utf8_lossy(&chunk).into_owned();
+                        if s.contains(&format!("POISONMARK{idx}")) {
+                            return Ok(());
+                        }
+                        got.push(s);
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }

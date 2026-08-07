@@ -30,10 +30,11 @@ pub enum TerminalEvent<I> {
     Exit   { id: I, code: Option<i32> },
 }
 
-/// Internal update messages sent from the platform reader thread.
+/// Update messages from the platform reader thread: raw output chunks exactly
+/// as read (CR/LF, UTF-8 tails and ANSI sequences preserved) plus EOF.
 #[derive(Debug)]
 pub enum TerminalUpdate {
-    Line(String),
+    Output(Vec<u8>),
     Closed,
 }
 
@@ -48,7 +49,8 @@ pub struct CommandSession {
 }
 
 pub struct CommandPoll {
-    pub lines: Vec<String>,
+    /// Raw output chunks drained since the last poll, in order.
+    pub outputs: Vec<Vec<u8>>,
     /// Exit code of the session, if it has exited.
     #[allow(dead_code)]
     pub exit_code: Option<i32>,
@@ -70,11 +72,11 @@ impl CommandSession {
 
     /// Drain pending output and check exit status.
     pub fn poll(&mut self) -> CommandPoll {
-        let mut lines = Vec::new();
+        let mut outputs = Vec::new();
 
         loop {
             match self.receiver.try_recv() {
-                Ok(TerminalUpdate::Line(line)) => lines.push(line),
+                Ok(TerminalUpdate::Output(bytes)) => outputs.push(bytes),
                 Ok(TerminalUpdate::Closed) => self.closed_streams += 1,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -86,7 +88,7 @@ impl CommandSession {
 
         let exit_code = self.platform.try_wait();
         let closed = self.closed_streams >= 1 && exit_code.is_some();
-        CommandPoll { lines, exit_code, closed }
+        CommandPoll { outputs, exit_code, closed }
     }
 
     /// Write raw bytes to the session's input.
@@ -102,6 +104,12 @@ impl CommandSession {
     /// Kill the session. Returns true if the process was killed.
     pub fn kill(&mut self) -> bool {
         self.platform.kill()
+    }
+
+    /// True when the child runs on a real pseudo terminal (PTY/ConPTY), with
+    /// echo and full terminal semantics. False for the piped fallback.
+    pub fn is_real_pty(&self) -> bool {
+        self.platform.is_real_pty()
     }
 
     /// True once the session has fully exited.
@@ -163,8 +171,8 @@ mod tests {
         let mut saw_marker = false;
         while start.elapsed() < Duration::from_secs(5) {
             let poll = session.poll();
-            for line in &poll.lines {
-                if line.contains(marker) {
+            for chunk in &poll.outputs {
+                if chunk.windows(marker.len()).any(|w| w == marker.as_bytes()) {
                     saw_marker = true;
                 }
             }
@@ -192,8 +200,10 @@ mod tests {
         let start = Instant::now();
         let mut saw_first = false;
         while start.elapsed() < Duration::from_secs(5) {
-            for line in session.poll().lines {
-                if line.contains("first_12345") { saw_first = true; }
+            for chunk in &session.poll().outputs {
+                if chunk.windows(b"first_12345".len()).any(|w| w == b"first_12345") {
+                    saw_first = true;
+                }
             }
             if saw_first { break; }
             thread::sleep(Duration::from_millis(20));
@@ -203,8 +213,10 @@ mod tests {
         let start = Instant::now();
         let mut saw_second = false;
         while start.elapsed() < Duration::from_secs(5) {
-            for line in session.poll().lines {
-                if line.contains("second_67890") { saw_second = true; }
+            for chunk in &session.poll().outputs {
+                if chunk.windows(b"second_67890".len()).any(|w| w == b"second_67890") {
+                    saw_second = true;
+                }
             }
             if saw_second { break; }
             thread::sleep(Duration::from_millis(20));

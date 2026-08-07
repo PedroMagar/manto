@@ -186,7 +186,10 @@ pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) 
     if win.height < 5 {
         return false;
     }
-    let content_h = win.height.saturating_sub(4) as usize;
+    let is_emulator = term.emulator.is_some();
+    // Interactive (emulator) terminals render the scrollbar over the full
+    // interior; line-mode terminals reserve rows for the path/input bars.
+    let content_h = win.height.saturating_sub(if is_emulator { 2 } else { 4 }) as usize;
     let sb_x = win.position_x.saturating_add(win.width).saturating_sub(2);
     if x != sb_x {
         return false;
@@ -196,7 +199,10 @@ pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) 
         return false;
     }
 
-    let lines_len = term.shell_lines.len();
+    let lines_len = match term.emulator.as_ref() {
+        Some(em) => em.total_lines(),
+        None => term.shell_lines.len(),
+    };
     if lines_len <= content_h {
         if let Some(t) = app.terminal.as_mut() {
             if t.panel_scroll != 0 {
@@ -226,26 +232,46 @@ pub fn interact_terminal_vertical_scroll(app: &mut Application, x: u16, y: u16) 
 
 pub fn sync_terminal_window_metrics(applications: &mut [Application]) {
     for app in applications.iter_mut() {
-        let Some(term) = app.terminal.as_ref() else {
-            continue;
+        // Snapshot geometry without holding overlapping mutable borrows.
+        let (width, height) = match app.window() {
+            Some(w) => (w.width, w.height),
+            None => continue,
         };
-        let is_session = term.shell_session.is_some();
-        let content_w = crate::ui::terminal_content_width(&term.path, &term.commands);
+
+        let mut grid: Option<(u16, u16)> = None;
+        let content_w = match app.terminal.as_ref() {
+            Some(term) if term.emulator.is_some() => {
+                grid = Some((width.saturating_sub(2).max(2), height.saturating_sub(2).max(2)));
+                None
+            }
+            Some(term) => Some(crate::ui::terminal_content_width(&term.path, &term.commands)),
+            None => None,
+        };
+
+        // Keep the emulator grid and the child PTY/ConPTY in sync with the
+        // window's inner size.
+        if let Some((cols, rows)) = grid {
+            if let Some(term) = app.terminal.as_mut() {
+                term.set_grid_size(cols, rows);
+            }
+        }
 
         if let Some(win) = app.window_mut() {
-            if is_session {
-                // Shell sessions do not use horizontal scroll; vertical scroll
-                // is intra-window (draw_shell_content). content_w = 0 disables
-                // the chrome horizontal scrollbar.
-                win.content_w = 0;
-                win.content_h = 0;
-                win.scroll_x = 0;
-            } else {
-                let visible_w = win.width.saturating_sub(2) as usize;
-                let max_scroll = content_w.saturating_sub(visible_w) as u16;
-                win.content_w = content_w.min(u16::MAX as usize) as u16;
-                win.scroll_x = win.scroll_x.min(max_scroll);
-                win.content_h = 0;
+            match content_w {
+                Some(cw) => {
+                    let visible_w = win.width.saturating_sub(2) as usize;
+                    let max_scroll = cw.saturating_sub(visible_w) as u16;
+                    win.content_w = cw.min(u16::MAX as usize) as u16;
+                    win.scroll_x = win.scroll_x.min(max_scroll);
+                    win.content_h = 0;
+                }
+                None => {
+                    // Emulator terminals: no chrome scrollbars; the grid is
+                    // already sized to the window.
+                    win.content_w = 0;
+                    win.content_h = 0;
+                    win.scroll_x = 0;
+                }
             }
         }
     }
@@ -359,6 +385,36 @@ pub fn spawn_terminal_window(
     let ty = 1 + usable_h.saturating_sub(th) / 2;
     let win = Window::new(tx, ty, tw, th, 0);
     applications.push(Application::terminal_window(title, win, path.to_string(), commands).with_desktop(current_desktop));
+    applications.len() - 1
+}
+
+/// Spawn an interactive terminal running `program` directly.
+pub fn spawn_interactive_terminal(
+    applications: &mut Vec<Application>,
+    next_terminal_id: &mut usize,
+    current_desktop: usize,
+    screen_w: u16,
+    screen_h: u16,
+    path: &str,
+    program: &str,
+) -> usize {
+    let id = *next_terminal_id;
+    *next_terminal_id += 1;
+    let title = if program.trim().is_empty() {
+        format!("App {}", id)
+    } else {
+        program.split_whitespace().next().unwrap_or(program).to_string()
+    };
+    let usable_h = screen_h.saturating_sub(4);
+    let tw = (screen_w / 2).max(30).min(screen_w.saturating_sub(6));
+    let th = (usable_h * 2 / 3).max(8).min(usable_h);
+    let tx = (screen_w.saturating_sub(tw)) / 2;
+    let ty = 1 + usable_h.saturating_sub(th) / 2;
+    let win = Window::new(tx, ty, tw, th, 0);
+    applications.push(
+        Application::interactive_terminal_window(title, win, path.to_string(), program)
+            .with_desktop(current_desktop),
+    );
     applications.len() - 1
 }
 
