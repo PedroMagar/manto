@@ -33,6 +33,7 @@ impl Window {
     }
 
     /// Set the internal content resolution, enabling scrollbars when needed.
+    #[allow(dead_code)]
     pub fn with_content(mut self, content_w: u16, content_h: u16) -> Self {
         self.content_w = content_w;
         self.content_h = content_h;

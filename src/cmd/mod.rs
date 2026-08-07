@@ -117,6 +117,7 @@ impl CommandEntry {
     }
 
     /// Check if this is a builtin exit command.
+    #[allow(dead_code)]
     pub fn is_exit(&self) -> bool {
         self.kind == CommandKind::Builtin
             && self.command.trim().split_whitespace().next() == Some("exit")

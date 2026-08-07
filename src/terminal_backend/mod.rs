@@ -48,9 +48,11 @@ pub struct CommandSession {
 }
 
 pub struct CommandPoll {
-    pub lines:    Vec<String>,
+    pub lines: Vec<String>,
+    /// Exit code of the session, if it has exited.
+    #[allow(dead_code)]
     pub exit_code: Option<i32>,
-    pub closed:   bool,
+    pub closed: bool,
 }
 
 impl CommandSession {
@@ -103,12 +105,14 @@ impl CommandSession {
     }
 
     /// True once the session has fully exited.
+    #[allow(dead_code)]
     pub fn is_closed(&self) -> bool {
         self.closed_streams >= 1
     }
 
     /// Label of the backend in use (diagnostics/tests).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn kind_label(&self) -> &'static str {
         self.platform.kind_label()
     }

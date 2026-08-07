@@ -1,8 +1,6 @@
 // Full-frame composition: draws the desktop, windows, tabs, panels, status
 // bar, input rows, and the pointer in a single pass.
 
-use std::io::Write;
-
 use super::ansi;
 use super::pointer::Pointer;
 use super::window::{MIN_W, MIN_H};

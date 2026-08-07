@@ -601,6 +601,7 @@ impl Drop for PlatformCommand {
 
 #[cfg(test)]
 impl PlatformCommand {
+    #[allow(dead_code)]
     pub fn kind_label(&self) -> &'static str {
         match self {
             PlatformCommand::Conpty(_) => "conpty",

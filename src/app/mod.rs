@@ -29,6 +29,8 @@ pub enum DisplayMode {
 }
 
 impl Application {
+    /// Create a plain windowed app.
+    #[allow(dead_code)]
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
         Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: false, terminal: None }
     }

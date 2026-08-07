@@ -59,12 +59,6 @@ impl History {
             let _ = writeln!(file, "{}", line);
         }
     }
-
-    /// Get the path to the history file (for testing/debugging).
-    #[cfg(test)]
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
 }
 
 fn home_dir() -> Option<PathBuf> {
