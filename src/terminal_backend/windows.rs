@@ -216,6 +216,40 @@ fn get_shell_path() -> String {
     std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
 }
 
+/// Quote a whole program string for CreateProcessW the way the ConPTY child
+/// has always been started: a bare command is wrapped verbatim, an empty one
+/// falls back to the default shell.
+fn quote_program(program: &str) -> String {
+    if program.trim().is_empty() {
+        format!("\"{}\"", get_shell_path())
+    } else {
+        format!("\"{}\"", program)
+    }
+}
+
+/// Render a CreateProcessW command line from a program and its arguments,
+/// quoting only the tokens that contain whitespace. Tokens that arrive
+/// already quoted (e.g. a `resolve_program` output with a spaced path) pass
+/// through untouched, so the module/args split parses exactly once.
+fn render_cmdline(program: &str, args: &[String]) -> String {
+    let mut cmd = String::new();
+    let mut first = true;
+    for token in std::iter::once(program).chain(args.iter().map(String::as_str)) {
+        if !first {
+            cmd.push(' ');
+        }
+        first = false;
+        if token.starts_with('"') || !token.contains([' ', '\t']) {
+            cmd.push_str(token);
+        } else {
+            cmd.push('"');
+            cmd.push_str(token);
+            cmd.push('"');
+        }
+    }
+    cmd
+}
+
 /// Resolve a bare program name to its real executable path (PATH + PATHEXT).
 ///
 /// App-execution aliases (e.g. `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`)
@@ -245,8 +279,11 @@ fn resolve_program(command: &str) -> String {
 }
 
 /// Try to host a persistent shell via ConPTY. Returns None if creation fails.
+///
+/// `command_line` is the full CreateProcessW command line (see
+/// `quote_program`/`render_cmdline` for how callers build it).
 fn try_spawn_conpty(
-    command: &str,
+    command_line: &str,
     cwd: &str,
     tx: Sender<TerminalUpdate>,
 ) -> Option<ConPtySession> {
@@ -299,12 +336,7 @@ fn try_spawn_conpty(
             return None;
         }
 
-        let shell = if command.trim().is_empty() {
-            get_shell_path()
-        } else {
-            command.to_string()
-        };
-        let cmd_str = format!("\"{}\"", shell);
+        let cmd_str = command_line.to_string();
         let cmd_wide: Vec<u16> = cmd_str.encode_utf16().collect();
         let mut cmd_buf: Vec<u16> = cmd_wide.into_iter().chain(Some(0)).collect();
 
@@ -705,7 +737,7 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
     let command = resolve_program(command);
     let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&command, cwd));
     if viable {
-        if let Some(conpty) = try_spawn_conpty(&command, cwd, tx.clone()) {
+        if let Some(conpty) = try_spawn_conpty(&quote_program(&command), cwd, tx.clone()) {
             return Ok(PlatformCommand::Conpty(conpty));
         }
     }
@@ -720,11 +752,33 @@ pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result
     let program = resolve_program(program);
     let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&program, cwd));
     if viable {
-        if let Some(conpty) = try_spawn_conpty(&program, cwd, tx.clone()) {
+        if let Some(conpty) = try_spawn_conpty(&render_cmdline(&program, &[]), cwd, tx.clone()) {
             return Ok(PlatformCommand::Conpty(conpty));
         }
     }
     Ok(PlatformCommand::Pipe(spawn_app_pipe(&program, cwd, tx)?))
+}
+
+/// Spawn a program with explicit arguments, preferring ConPTY. This is the
+/// `TerminalBackend::spawn` platform path: the program name is resolved
+/// through PATH like `spawn_app`, the rendered command line (program + args)
+/// hosts the child directly, and the piped fallback runs it through `cmd` so
+/// quoting resolves like a typed command.
+pub fn spawn_argv(
+    program: &str,
+    args: &[String],
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
+    let program = resolve_program(program);
+    let cmdline = render_cmdline(&program, args);
+    let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&program, cwd));
+    if viable {
+        if let Some(conpty) = try_spawn_conpty(&cmdline, cwd, tx.clone()) {
+            return Ok(PlatformCommand::Conpty(conpty));
+        }
+    }
+    Ok(PlatformCommand::Pipe(spawn_app_pipe(&cmdline, cwd, tx)?))
 }
 
 #[cfg(test)]

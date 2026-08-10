@@ -489,11 +489,11 @@ pub fn split_active_terminal_window(
         return None;
     }
 
-    let (x, y, w, h, resizable, path) = {
+    let (x, y, w, h, resizable, path, commands) = {
         let app = applications.get(idx)?;
         let win = app.window()?;
-        let path = app.terminal.as_ref()?.path.clone();
-        (win.position_x, win.position_y, win.width, win.height, win.resizable, path)
+        let terminal = app.terminal.as_ref()?;
+        (win.position_x, win.position_y, win.width, win.height, win.resizable, terminal.path.clone(), terminal.commands.clone())
     };
 
     if !resizable {
@@ -541,7 +541,7 @@ pub fn split_active_terminal_window(
         new_geom.2,
         new_geom.3,
         &path,
-        Vec::new(),
+        commands,
     ))
 }
 

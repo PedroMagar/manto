@@ -163,6 +163,16 @@ pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result
     spawn_pty(&argv, cwd, tx)
 }
 
+/// Spawn a program with explicit arguments attached to a fresh PTY
+/// (`execvp(program, program args...)`, no shell in between). This is the
+/// `TerminalBackend::spawn` platform path.
+pub fn spawn_argv(program: &str, args: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(program.to_string());
+    argv.extend_from_slice(args);
+    spawn_pty(&argv, cwd, tx)
+}
+
 fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
     let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
     if master_fd < 0 {
@@ -230,6 +240,16 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
     };
 
     // ── Parent ──
+    // The master end is made non-blocking: the reader thread below parks in
+    // poll() and reads only what the fd reports ready, so a stuck child can
+    // never block the drain. The input thread already retries EAGAIN.
+    let flags = unsafe { libc::fcntl(master_fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe {
+            let _ = libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+
     // Input forwarding thread: read from the channel, write to the PTY master.
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let input_thread = thread::spawn(move || {
@@ -254,19 +274,45 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
         }
     });
 
-    // Output reader thread: forwards raw bytes.
+    // Output reader thread: parks in poll() and reads only what the master
+    // reports as ready, then forwards the raw bytes as they arrive. EOF (the
+    // child closed its end) or a hard read error ends the loop. Polling a
+    // non-blocking fd guarantees the read below never blocks, so one busy
+    // session cannot stall the others.
     let tx_out = tx.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
+            let mut pfd = libc::pollfd {
+                fd: master_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut pfd, 1, -1) };
+            if ready < 0 {
+                // Poll failed: the fd is gone, nothing more to read.
+                break;
+            }
+            if ready == 0 || pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+                continue;
+            }
             unsafe {
                 let ret = libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-                if ret <= 0 {
+                if ret > 0 {
+                    let n = ret as usize;
+                    if tx_out.send(TerminalUpdate::Output(buf[..n].to_vec())).is_err() {
+                        break;
+                    }
+                } else if ret == 0 {
+                    // EOF: the child closed its end of the pty.
                     break;
-                }
-                let n = ret as usize;
-                if tx_out.send(TerminalUpdate::Output(buf[..n].to_vec())).is_err() {
-                    break;
+                } else {
+                    // EAGAIN after a poll wakeup is a benign race on a
+                    // non-blocking fd; loop back to poll().
+                    let err = io::Error::last_os_error();
+                    if err.kind() != io::ErrorKind::WouldBlock {
+                        break;
+                    }
                 }
             }
         }

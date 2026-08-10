@@ -73,6 +73,20 @@ impl Desktop {
 
         let config = Config::load();
 
+        // Shared history file is the source of truth for both the dock and the
+        // terminal windows: commands typed anywhere are appended to it and
+        // every new terminal is seeded from it.
+        let history = History::new();
+        let loaded_history = history.load(1000);
+        let history_commands: Vec<CommandEntry> = if loaded_history.is_empty() {
+            Vec::new()
+        } else {
+            let cwd = current_path.clone();
+            loaded_history.iter().map(|line| {
+                CommandEntry::completed(line, &cwd, vec![line.clone()])
+            }).collect()
+        };
+
         // Restore the saved desktop layout (window geometry + active desktop).
         let mut applications = Vec::new();
         sync_terminal_window_metrics(&mut applications);
@@ -96,7 +110,7 @@ impl Desktop {
                     saved.desktop.clamp(1, crate::ui::DESKTOP_COUNT),
                     x, y, w, h,
                     &cwd,
-                    Vec::new(),
+                    history_commands.clone(),
                 );
                 if let Some(app) = applications.get_mut(idx) {
                     app.title = saved.title;
@@ -106,16 +120,7 @@ impl Desktop {
         sync_terminal_window_metrics(&mut applications);
         let next_terminal_id = applications.len().saturating_add(1).max(1);
 
-        let history = History::new();
-        let loaded_history = history.load(1000);
-        let commands: Vec<CommandEntry> = if loaded_history.is_empty() {
-            Vec::new()
-        } else {
-            let cwd = current_path.clone();
-            loaded_history.iter().map(|line| {
-                CommandEntry::completed(line, &cwd, vec![line.clone()])
-            }).collect()
-        };
+        let commands = history_commands;
 
         Self {
             mode: Mode::Normal,
@@ -692,6 +697,7 @@ impl Desktop {
     fn run_action(&mut self, action: Action) -> bool {
         match action {
             Action::NewTerminal => {
+                let history_commands = self.shared_history_commands();
                 let app_idx = spawn_terminal_window(
                     &mut self.applications,
                     &mut self.next_terminal_id,
@@ -699,7 +705,7 @@ impl Desktop {
                     self.last_size.0,
                     self.last_size.1,
                     &self.current_path,
-                    Vec::new(),
+                    history_commands,
                 );
                 place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
                 self.mode = Mode::TerminalFocus { app_idx };
@@ -1529,25 +1535,58 @@ impl Desktop {
     /// Send the `.>` line: to the session (classic line mode) or, without a
     /// session, through the command runner. Resets the input bar.
     fn run_terminal_line(&mut self, app_idx: usize) -> bool {
-        let Some(t) = self.applications[app_idx].terminal.as_mut() else {
+        let cmd = self.applications[app_idx].terminal.as_ref()
+            .map(|t| t.cmd_input.trim().to_string())
+            .unwrap_or_default();
+        if cmd.is_empty() {
             return false;
-        };
-        let is_session = t.shell_session.is_some();
-        let cmd = t.cmd_input.trim().to_string();
-        if !cmd.is_empty() {
-            if is_session {
+        }
+        {
+            let t = self.applications[app_idx].terminal.as_mut().unwrap();
+            if t.shell_session.is_some() {
                 t.run_line(&cmd);
             } else {
                 push_shell_command(&mut t.commands, &mut t.path, &cmd);
             }
-            t.cmd_input.clear();
-            t.input_cursor = 0;
-            input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-            t.panel_scroll = 0;
-            true
-        } else {
-            false
         }
+        self.record_command(&cmd);
+        let t = self.applications[app_idx].terminal.as_mut().unwrap();
+        t.cmd_input.clear();
+        t.input_cursor = 0;
+        input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+        t.panel_scroll = 0;
+        true
+    }
+
+    /// Record a command executed in a terminal window into the shared
+    /// history: appended to the persistent file (the dock reads it back on
+    /// the next run) and mirrored into the dock's live command list so dock
+    /// Up/Down recall sees it immediately. Duplicates of the last entry are
+    /// skipped, keeping the shared list tidy.
+    fn record_command(&mut self, cmd: &str) {
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        self.history.append(cmd);
+        if self.commands.last().map(|e| e.command != cmd).unwrap_or(true) {
+            self.commands.push(CommandEntry::completed(cmd, &self.current_path, Vec::new()));
+        }
+    }
+
+    /// Command list seeded into newly spawned terminal windows: the shared
+    /// history file (dock + terminals), so every window recalls the same
+    /// commands with Up/Down.
+    fn shared_history_commands(&self) -> Vec<CommandEntry> {
+        let cwd = self.current_path.clone();
+        self.history.load(1000).into_iter().filter_map(|line| {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                None
+            } else {
+                Some(CommandEntry::completed(&line, &cwd, vec![line.clone()]))
+            }
+        }).collect()
     }
 
     /// Index of the open start menu window on the current desktop.
@@ -1681,6 +1720,7 @@ impl Desktop {
                 )
             }
             MenuKind::Terminal | MenuKind::Command => {
+                let history_commands = self.shared_history_commands();
                 let idx = spawn_terminal_window(
                     &mut self.applications,
                     &mut self.next_terminal_id,
@@ -1688,7 +1728,7 @@ impl Desktop {
                     self.last_size.0,
                     self.last_size.1,
                     &cwd,
-                    Vec::new(),
+                    history_commands,
                 );
                 if item.kind == MenuKind::Command && !command_line.is_empty() {
                     if let Some(t) = self.applications[idx].terminal.as_mut() {

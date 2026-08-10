@@ -482,13 +482,25 @@ impl TerminalState {
     pub fn tick(&mut self) -> bool {
         let mut changed = tick_all(&mut self.commands);
         if let Some(ref mut session) = self.shell_session {
-            let poll = session.poll();
-            let got_bytes = !poll.outputs.is_empty();
-            for chunk in &poll.outputs {
-                if let Some(em) = self.emulator.as_mut() {
-                    em.process(chunk);
+            use crate::terminal_backend::{TerminalBackend, TerminalEvent};
+            let events = TerminalBackend::poll(session);
+            let got_bytes = events.iter().any(|e| matches!(e, TerminalEvent::Output { .. }));
+            for event in events {
+                match event {
+                    TerminalEvent::Output { id: (), bytes } => {
+                        if let Some(em) = self.emulator.as_mut() {
+                            em.process(&bytes);
+                        }
+                        self.tail.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    TerminalEvent::Exit { id: (), code } => {
+                        // The child left: clear any lingering REPL prompt.
+                        // `code` is the session's exit status, kept live for
+                        // the backend contract.
+                        self.repl_prompt = None;
+                        let _ = code;
+                    }
                 }
-                self.tail.push_str(&String::from_utf8_lossy(chunk));
             }
             // Emulator-only progress (no newline) still needs a redraw.
             if got_bytes {
@@ -506,9 +518,6 @@ impl TerminalState {
                     }
                     None => break,
                 }
-            }
-            if poll.closed {
-                self.repl_prompt = None;
             }
             // Stable partial (e.g. a ">>> " prompt): flush when the pipe is
             // momentarily quiet.

@@ -303,8 +303,8 @@ fn decode_x10_mouse(bytes: [u8; 3]) -> super::Key {
     let (button, kind) = mouse_from_code(code as u32, pressed, motion);
 
     super::Key::Mouse(super::MouseEvent {
-        x,
-        y,
+        x: u16::from(x),
+        y: u16::from(y),
         kind,
         button,
         shift: code & 0x4 != 0,
