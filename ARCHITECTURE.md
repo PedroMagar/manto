@@ -4,24 +4,83 @@
 
 Manto prioritizes portability, low dependency surface, and clear separation between UI logic and host-specific integration. The long-term goal is to keep the project viable both on mainstream operating systems and on a future custom OS.
 
+## Source Layout
+
+The `src/` tree is organized by layer, keeping a clean dependency direction (`os` < `terminal_backend` < `cmd`/`input` < `wm` < `app` < `ui`, with the crate root tying them together):
+
+```
+src/
+  main.rs              entry point: terminal setup, main loop, teardown
+  os/                  host abstraction (Writer, Clock, Key, MouseEvent + platform impls)
+    mod.rs
+    unix.rs            #[cfg(unix)] platform
+    windows.rs         #[cfg(windows)] platform
+  ui/                  presentation: ANSI, window chrome, drawing, frame render
+    mod.rs             status bar, desktop frame, tabs, scrollbar, constants
+    ansi.rs            ANSI / VT100 sequences
+    window.rs          Window: geometry, chrome drawing, scroll interaction
+    pointer.rs         Pointer: movement and cursor drawing
+    panel.rs           command panel (blocks, priority, clipping) + tests
+    terminal_view.rs   terminal / shell content rendering
+    render.rs          damage-based frame diff + composition + tests
+    screen.rs          frame grid (char + style), selection, StampWriter
+  app/                 domain state
+    mod.rs             Application, DisplayMode
+    terminal.rs        TerminalState + REPL helpers + tests
+    desktop.rs         Desktop: session state, input handling, tick, draw
+  wm/                  window manager actions (snap, split, focus, resize) + tests
+  terminal_emulator/   host-independent ANSI/VT emulator (grid, cursor, SGR, alt screen)
+    mod.rs             Terminal, Screen, Cell, attributes, parser + tests
+  cmd/                 command entries, one-shot runner, built-ins + tests
+  input/               line editing, completion, persistent history + tests
+    mod.rs
+    history.rs
+  terminal_backend/    persistent shell sessions (PTY/ConPTY FFI)
+    mod.rs             CommandSession + platform selection
+    unix.rs
+    windows.rs
+  config.rs            user config (~/.manto/config.json): theme + remappable shortcuts
+  json.rs              minimal zero-dependency JSON parser (shared)
+  session.rs           session persistence (~/.manto/session.json)
+```
+
+The rule for porting: most host-specific change lives in `os/` and
+`terminal_backend/`. `terminal_emulator/` is purely host-independent and
+`ui::terminal_view` maps its grid into windows.
+
 ## Portability Over Dependencies
 
 The project avoids third-party terminal crates such as `crossterm` and works directly with ANSI / VT100 output plus a thin host abstraction layer. This keeps the runtime model simple and reduces friction for future ports.
 
 ## OS Isolation Layer
 
-Everything that depends on the host OS is concentrated in `os.rs`:
+Everything that depends on the host OS is concentrated in `os/`:
 
 - `Writer`: output abstraction
 - `Clock`: time abstraction
-- `Key`: keyboard event abstraction
-- platform-specific modules for raw mode, terminal size, polling, and key decoding
+- `Key`: keyboard event abstraction (including `Key::Mouse` for pointer events)
+- `MouseEvent`: normalized pointer events (button, action, modifiers, cell coordinates)
+- clipboard bridge (Win32 FFI on Windows, `xclip`/`xsel`/`wl-copy` on Unix)
+- platform-specific modules for raw mode, terminal size, polling, key and mouse decoding
 
-The intended rule is: when porting Manto to another OS, most of the change should happen in `os.rs`.
+Mouse input is a host concern with two fetch paths:
+- Unix: DEC mouse tracking is enabled on stdout (`?1000`/`?1002`/`?1003`/`?1006`
+  SGR modes) and reports are decoded from the input stream (SGR `ESC[<b;x;yM/m`
+  plus the legacy X10 `ESC[M` form).
+- Windows: `ENABLE_MOUSE_INPUT` stays on and `MOUSE_EVENT_RECORD`s are decoded
+  from `ReadConsoleInputW`; the same DEC modes are emitted on stdout so VT hosts
+  (VS Code / Windows Terminal via ConPTY) relay pointer events, and physical
+  conhost clicks reach the same decoder.
+
+`Desktop.mouse_enabled` (default on, toggled with Ctrl+M, configurable) gates
+all pointer handling; when off, pointer events are dropped and the pointer is
+driven only by the keyboard.
+
+The intended rule is: when porting Manto to another OS, most of the change should happen in `os/`.
 
 ## ANSI Layer
 
-`ansi.rs` emits ANSI / VT100 control sequences through `std::io::Write` and does not depend on platform conditionals. This keeps rendering logic separate from OS handling.
+`ui/ansi.rs` emits ANSI / VT100 control sequences through `std::io::Write` and does not depend on platform conditionals. This keeps rendering logic separate from OS handling.
 
 ## Application And Window Separation
 
@@ -35,7 +94,21 @@ Current display states are centered around:
 
 ## Layering
 
-Each `Window` carries a `layer` field for z-order and future compositing use. The current stacking model is still mostly vector-order based, but the layer field preserves a path for richer composition later.
+Each `Window` carries a `layer` field that is the real z-order: raising a
+window (focus, restore, drag-to-front) bumps its layer above everything else,
+and drawing, focus selection and hit-testing (`topmost_window_at`,
+`active_window_idx`) order windows by `(layer, vector index)`. The backing
+vector acts as a stable tiebreaker within the same layer.
+
+## Damage-Based Rendering
+
+Frames are composed in memory and compared to the previous frame; only changed
+rows are rewritten, carrying per-cell styles through minimal SGR transitions
+(`ui::screen.rs` keeps a char + style grid via `StampWriter`, which parses the
+SGR stream to reconstruct absolute styles). A full `clear` happens only when
+the host terminal resizes. Free screen selection and hover highlights are
+treated as part of the cell style, so attribute-only changes repaint correctly
+and flicker is avoided.
 
 ## Resize Preview Model
 
@@ -53,6 +126,11 @@ The preferred direction is:
 4. render the resulting state inside the Manto UI
 
 This means features such as shell history and completion should ideally come from a terminal session backend, not from hardcoded UI logic.
+
+Adopted constraints for this direction:
+
+- PTY (Unix) and ConPTY (Windows) are implemented through hand-written FFI, with no external crates. This matches the portability policy above.
+- Unix and Windows backends evolve in parallel behind a single `TerminalBackend` interface.
 
 ## Why A Backend Alone Is Not Enough
 
@@ -98,7 +176,9 @@ Expected future replacements:
 
 If this boundary is respected, the emulator and UI should remain mostly unchanged.
 
-## Suggested Backend Interface
+## Backend Interface
+
+The backend contract is the single boundary between host and emulator/UI:
 
 ```rust
 trait TerminalBackend {
@@ -123,40 +203,27 @@ This keeps responsibilities clear:
 - emulator: terminal semantics
 - UI: presentation
 
-## Suggested Phases
+## Start Menu Manifest
 
-### Phase 1: Command Runner
-
-- run full commands
-- capture stdout / stderr
-- show line-based output in the internal terminal
-- no persistent interactive shell yet
-
-### Phase 2: Real Shell Backend
-
-- start a shell through PTY / ConPTY
-- forward raw key input
-- read raw output back
-- let the shell handle history and completion
-
-### Phase 3: Richer Terminal Behavior
-
-- proper resize handling
-- full-screen terminal apps
-- better scrollback
-- colors, alternate screen, and cursor behavior
-
-## Start Menu Direction
-
-The Start menu should likely be driven by a declarative manifest before moving to arbitrary scripting.
-
+The Start menu is driven by a declarative manifest loaded from
+`~/.manto/menu.json` (with `example/menu.json` as the reference format).
 Useful fields:
 
 - `label`
-- `kind`
+- `kind` (`app` / `terminal` / `command`)
 - `command`
 - `args`
 - `cwd`
 - `desktop`
 
-That keeps it customizable without coupling it too early to an embedded scripting engine.
+To preserve the zero-dependency policy, the manifest is read by a minimal
+hand-written JSON parser (`json.rs`) rather than re-enabling `serde`.
+
+## User Config And Session Persistence
+
+User configuration lives in `~/.manto/config.json` (theme 0–2 and remappable
+desktop shortcuts — including the mouse toggle). Window geometry, titles,
+working directories and the active desktop are persisted to
+`~/.manto/session.json` on quit and restored on the next start (shell sessions
+themselves are host processes and do not survive, but the layout does). Both
+files are optional; a broken or missing file falls back to defaults.

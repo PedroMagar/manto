@@ -11,6 +11,8 @@
 
 use std::io::{self, Write};
 
+use crate::terminal_emulator::{Attributes, Cell, Color, Style};
+
 /// An axis-aligned box over the screen (or a displayed content area).
 /// Coordinates are 0-based (row, col).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,13 +33,13 @@ impl BoxSelect {
 pub struct ScreenGrid {
     w: usize,
     h: usize,
-    cells: Vec<Vec<char>>,
+    cells: Vec<Vec<Cell>>,
 }
 
 impl ScreenGrid {
     pub fn new(w: u16, h: u16) -> Self {
         let (w, h) = (w.max(1) as usize, h.max(1) as usize);
-        ScreenGrid { w, h, cells: vec![vec![' '; w]; h] }
+        ScreenGrid { w, h, cells: vec![vec![Cell::default(); w]; h] }
     }
 
     pub fn resize(&mut self, w: u16, h: u16) {
@@ -45,7 +47,7 @@ impl ScreenGrid {
         if w != self.w || h != self.h {
             self.w = w;
             self.h = h;
-            self.cells = vec![vec![' '; w]; h];
+            self.cells = vec![vec![Cell::default(); w]; h];
         } else {
             self.clear();
         }
@@ -54,22 +56,62 @@ impl ScreenGrid {
     pub fn clear(&mut self) {
         for row in self.cells.iter_mut() {
             for c in row.iter_mut() {
-                *c = ' ';
+                *c = Cell::default();
             }
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, ch: char) {
+    fn set(&mut self, x: usize, y: usize, cell: Cell) {
         if x < self.w && y < self.h {
-            self.cells[y][x] = ch;
+            self.cells[y][x] = cell;
         }
+    }
+
+    /// Write a cell directly with a plain default style (used for overlays
+    /// whose style is not captured through the writer).
+    #[allow(dead_code)]
+    pub fn set_cell(&mut self, x: u16, y: u16, ch: char) {
+        let mut cell = Cell::default();
+        cell.ch = ch;
+        self.set(x as usize, y as usize, cell);
+    }
+
+    /// Write a cell with an explicit style.
+    #[allow(dead_code)]
+    pub fn put(&mut self, x: u16, y: u16, cell: Cell) {
+        self.set(x as usize, y as usize, cell);
+    }
+
+    pub fn width(&self) -> usize {
+        self.w
+    }
+
+    pub fn height(&self) -> usize {
+        self.h
     }
 
     pub fn char_at(&self, x: usize, y: usize) -> char {
         if x < self.w && y < self.h {
-            self.cells[y][x]
+            self.cells[y][x].ch
         } else {
             ' '
+        }
+    }
+
+    pub fn style_at(&self, x: usize, y: usize) -> Style {
+        if x < self.w && y < self.h {
+            self.cells[y][x].style
+        } else {
+            Style::default()
+        }
+    }
+
+    /// Full cell (character + style) at (x, y).
+    pub fn cell_at(&self, x: usize, y: usize) -> Cell {
+        if x < self.w && y < self.h {
+            self.cells[y][x]
+        } else {
+            Cell::default()
         }
     }
 
@@ -113,6 +155,7 @@ pub struct StampWriter<'a, W: Write> {
     osc_esc: bool,
     xoff: u16,
     yoff: u16,
+    style: Style,
 }
 
 impl<'a, W: Write> StampWriter<'a, W> {
@@ -127,10 +170,12 @@ impl<'a, W: Write> StampWriter<'a, W> {
             osc_esc: false,
             xoff: 0,
             yoff: 0,
+            style: Style::default(),
         }
     }
 
     /// The captured screen grid (after rendering a frame).
+    #[allow(dead_code)]
     pub fn grid(&self) -> &ScreenGrid {
         self.grid
     }
@@ -139,7 +184,10 @@ impl<'a, W: Write> StampWriter<'a, W> {
         let (x, y) = self.pos;
         let gx = x.saturating_add(self.xoff) as usize;
         let gy = y.saturating_add(self.yoff) as usize;
-        self.grid.set(gx, gy, ch);
+        let mut cell = Cell::default();
+        cell.ch = ch;
+        cell.style = self.style;
+        self.grid.set(gx, gy, cell);
         if x + 1 < self.grid.w as u16 {
             self.pos.0 = x + 1;
         }
@@ -176,8 +224,12 @@ impl<'a, W: Write> StampWriter<'a, W> {
                 let mode: u16 = params.parse().unwrap_or(0);
                 if mode == 2 {
                     self.grid.clear();
+                    self.style.reset();
                     self.pos = (0, 0);
                 }
+            }
+            b'm' => {
+                apply_sgr(&mut self.style, &params);
             }
             _ => {}
         }
@@ -240,6 +292,75 @@ impl<'a, W: Write> StampWriter<'a, W> {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Apply a CSI SGR parameter list (e.g. "38;5;196;1" or "0") to a running
+/// style, reconstructing the absolute cell style from Manto's minimal SGR
+/// transitions (RESET + only the differences that changed).
+fn apply_sgr(style: &mut Style, params: &str) {
+    let mut it = params.split(';');
+    while let Some(p) = it.next() {
+        let param = p.parse::<u16>().unwrap_or(0);
+        match param {
+            0 => style.reset(),
+            1 => style.attrs.set(Attributes::BOLD, true),
+            2 => style.attrs.set(Attributes::DIM, true),
+            3 => style.attrs.set(Attributes::ITALIC, true),
+            4 => style.attrs.set(Attributes::UNDERLINE, true),
+            5 | 6 => style.attrs.set(Attributes::BLINK, true),
+            7 => style.attrs.set(Attributes::REVERSE, true),
+            8 => style.attrs.set(Attributes::HIDDEN, true),
+            9 => style.attrs.set(Attributes::STRIKE, true),
+            21 => style.attrs.set(Attributes::UNDERLINE, true),
+            22 => {
+                style.attrs.set(Attributes::BOLD, false);
+                style.attrs.set(Attributes::DIM, false);
+            }
+            23 => style.attrs.set(Attributes::ITALIC, false),
+            24 => style.attrs.set(Attributes::UNDERLINE, false),
+            25 => style.attrs.set(Attributes::BLINK, false),
+            27 => style.attrs.set(Attributes::REVERSE, false),
+            28 => style.attrs.set(Attributes::HIDDEN, false),
+            29 => style.attrs.set(Attributes::STRIKE, false),
+            30..=37 => style.fg = Color::Indexed(param as u8 - 30),
+            38 | 48 => {
+                let is_fg = param == 38;
+                match it.next().and_then(|s| s.parse::<u16>().ok()) {
+                    Some(5) => {
+                        if let Some(n) = it.next().and_then(|s| s.parse::<u16>().ok()) {
+                            let c = Color::Indexed((n % 256) as u8);
+                            if is_fg {
+                                style.fg = c;
+                            } else {
+                                style.bg = c;
+                            }
+                        }
+                    }
+                    Some(2) => {
+                        if let (Some(r), Some(g), Some(b)) = (
+                            it.next().and_then(|s| s.parse::<u16>().ok()),
+                            it.next().and_then(|s| s.parse::<u16>().ok()),
+                            it.next().and_then(|s| s.parse::<u16>().ok()),
+                        ) {
+                            let c = Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8);
+                            if is_fg {
+                                style.fg = c;
+                            } else {
+                                style.bg = c;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            39 => style.fg = Color::Default,
+            40..=47 => style.bg = Color::Indexed(param as u8 - 40),
+            49 => style.bg = Color::Default,
+            90..=97 => style.fg = Color::Indexed(8 + (param as u8 - 90)),
+            100..=107 => style.bg = Color::Indexed(8 + (param as u8 - 100)),
+            _ => {}
         }
     }
 }

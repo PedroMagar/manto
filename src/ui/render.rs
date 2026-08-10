@@ -34,99 +34,93 @@ pub fn render<W: std::io::Write>(
     focused_terminal: Option<(usize, &str, usize)>,
     grid: &mut ScreenGrid,
     selection: Option<&BoxSelect>,
+    theme: u16,
+    full_redraw: bool,
+    draw_pointer: bool,
 ) {
-    // Capture the rendered frame's text while forwarding everything unchanged.
-    let mut out = StampWriter::new(out, grid);
-
-    ansi::clear(&mut out);
-
-    draw_desktop(&mut out, 1, w, h, "Manto");
-
-    for (app_idx, app) in applications.iter().enumerate() {
-        if app.on_desktop(current_desktop) {
-            if let Some(win) = app.window() {
-                win.draw(&mut out, &app.title);
-                if let Some(term) = app.terminal.as_ref() {
-                    if let Some(em) = term.emulator.as_ref() {
-                        // Interactive terminal: full emulator grid + cursor.
-                        let focused = focused_terminal.map(|(i, _, _)| i) == Some(app_idx);
-                        draw_emulator_content(&mut out, win, em, term.panel_scroll, focused);
-                    } else if term.shell_session.is_some() {
-                        draw_shell_content(&mut out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
-                    } else {
-                        draw_terminal_content(&mut out, win, &term.path, &term.commands, term.panel_scroll);
-                    }
-                } else if let Some(menu) = app.menu.as_ref() {
-                    // Start menu: manifest entries with the selection.
-                    draw_menu_content(&mut out, win, menu);
-                }
-            }
-        }
-    }
-
+    // Compose the new frame entirely in memory (a fresh grid plus a buffer we
+    // throw away), so we can compare it to the previous frame and only emit
+    // the rows that changed — no `clear` + full redraw per frame.
     let minimized_count = applications.iter().filter(|a| a.on_desktop(current_desktop) && a.is_minimized()).count();
     let tab_x = w.saturating_sub(3);
     let sb_x  = w.saturating_sub(1);
     let sb_top = 1u16;
     let sb_bot = h.saturating_sub(4);
     let tabs = tab_layout(applications, current_desktop, h, tab_scroll);
-    if minimized_count > 0 {
-        for &(app_idx, tab_y, tab_h) in &tabs {
-            let is_hovered = pointer.x >= tab_x
-                && pointer.y >= tab_y
-                && pointer.y < tab_y + tab_h;
-            let offset = if is_hovered { scroll_offset } else { 0 };
-            draw_tab(&mut out, tab_x, tab_y, tab_h, &applications[app_idx].title, offset);
-        }
-        draw_scrollbar(&mut out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
-    }
 
-    if let Some((idx, pw, ph)) = resize_preview {
-        if applications[idx].on_desktop(current_desktop) {
-            if let Some(win) = applications[idx].window() {
-                win.draw_preview(&mut out, pw, ph);
+    let mut frame = ScreenGrid::new(w, h);
+    let mut buf = Vec::new();
+    {
+        let mut frame_out = StampWriter::new(&mut buf, &mut frame);
+
+        draw_desktop(&mut frame_out, theme, w, h, "Manto");
+
+        // Draw windows back-to-front by real z-order (layer, then vector order).
+        let mut draw_order: Vec<usize> = (0..applications.len()).collect();
+        draw_order.sort_by_key(|&i| {
+            let layer = applications[i].window().map_or(0, |win| win.layer);
+            (layer, i)
+        });
+        for app_idx in draw_order {
+            let app = &applications[app_idx];
+            if app.on_desktop(current_desktop) {
+                if let Some(win) = app.window() {
+                    win.draw(&mut frame_out, &app.title);
+                    if let Some(term) = app.terminal.as_ref() {
+                        if let Some(em) = term.emulator.as_ref() {
+                            // Interactive terminal: full emulator grid + cursor.
+                            let focused = focused_terminal.map(|(i, _, _)| i) == Some(app_idx);
+                            draw_emulator_content(&mut frame_out, win, em, term.panel_scroll, focused);
+                        } else if term.shell_session.is_some() {
+                            draw_shell_content(&mut frame_out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
+                        } else {
+                            draw_terminal_content(&mut frame_out, win, &term.path, &term.commands, term.panel_scroll);
+                        }
+                    } else if let Some(menu) = app.menu.as_ref() {
+                        // Start menu: manifest entries with the selection.
+                        draw_menu_content(&mut frame_out, win, menu);
+                    }
+                }
             }
         }
-    }
 
-    draw_command_panel(&mut out, w, h, path, commands, panel_scroll);
-    draw_status_bar(&mut out, w, h, path, !commands.is_empty(), current_desktop);
+        if minimized_count > 0 {
+            for &(app_idx, tab_y, tab_h) in &tabs {
+                let is_hovered = pointer.x >= tab_x
+                    && pointer.y >= tab_y
+                    && pointer.y < tab_y + tab_h;
+                let offset = if is_hovered { scroll_offset } else { 0 };
+                draw_tab(&mut frame_out, tab_x, tab_y, tab_h, &applications[app_idx].title, offset);
+            }
+            draw_scrollbar(&mut frame_out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
+        }
 
-    let start_end = STATUS_START_X + STATUS_START.len() as u16;
-    if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
-        ansi::move_to(&mut out, STATUS_START_X, h - 2);
-        write!(&mut out, "{}{}{}", ansi::REVERSE, STATUS_START, ansi::RESET).unwrap();
-    }
+        if let Some((idx, pw, ph)) = resize_preview {
+            if applications[idx].on_desktop(current_desktop) {
+                if let Some(win) = applications[idx].window() {
+                    win.draw_preview(&mut frame_out, pw, ph);
+                }
+            }
+        }
 
-    if let Some(d) = desktop_at(pointer.x, pointer.y, w, h) {
-        let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
-        let sep_x  = base_x + (d as u16 - 1) * 4;
-        ansi::move_to(&mut out, sep_x + 1, h - 2);
-        write!(&mut out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
-    }
+        draw_command_panel(&mut frame_out, w, h, path, commands, panel_scroll);
+        draw_status_bar(&mut frame_out, w, h, path, !commands.is_empty(), current_desktop);
 
-    let input_active = typing_input.is_some() || focused_terminal.is_some();
-
-    if let Some((input, cursor_pos)) = typing_input {
-        let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
-        let (display, cursor_col) = input::input_view(input, cursor_pos, max_len);
-        ansi::move_to(&mut out, CMD_INPUT_X, h - 2);
-        write!(&mut out, "{:<width$}", display, width = max_len).unwrap();
-        ansi::move_to(&mut out, CMD_INPUT_X + cursor_col as u16, h - 2);
-        ansi::show_cursor(&mut out);
-    } else if let Some((term_idx, term_input, cursor_pos)) = focused_terminal {
-        let interactive_mode = applications.get(term_idx)
-            .and_then(|a| a.terminal.as_ref())
-            .map_or(false, |t| t.interactive);
-        if interactive_mode {
-            // Interactive terminals draw their own cursor in the grid.
-            ansi::hide_cursor(&mut out);
-        } else if let Some(win) = applications.get(term_idx)
-            .filter(|a| a.on_desktop(current_desktop))
-            .and_then(|a| a.window())
-        {
-            if win.height >= 5 {
-                // Prefix: the " .> " bar or the active REPL prompt (e.g. ">>>").
+        if let Some((input, cursor_pos)) = typing_input {
+            let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
+            let (display, _) = input::input_view(input, cursor_pos, max_len);
+            ansi::move_to(&mut frame_out, CMD_INPUT_X, h - 2);
+            write!(&mut frame_out, "{:<width$}", display, width = max_len).unwrap();
+        } else if let Some((term_idx, term_input, cursor_pos)) = focused_terminal {
+            let interactive_mode = applications.get(term_idx)
+                .and_then(|a| a.terminal.as_ref())
+                .map_or(false, |t| t.interactive);
+            if !interactive_mode
+                && let Some(win) = applications.get(term_idx)
+                    .filter(|a| a.on_desktop(current_desktop))
+                    .and_then(|a| a.window())
+                && win.height >= 5
+            {
                 let repl = applications.get(term_idx)
                     .and_then(|a| a.terminal.as_ref())
                     .and_then(|t| t.repl_prompt.clone());
@@ -134,81 +128,225 @@ pub fn render<W: std::io::Write>(
                 let prefix_len = prefix.chars().count();
                 let inner_w    = (win.width - 2) as usize;
                 let max_len    = inner_w.saturating_sub(prefix_len);
-                let (display, cursor_col) = input::input_view(term_input, cursor_pos, max_len);
-                let cursor_x   = win.position_x + 1 + prefix_len as u16;
-                let cursor_y   = win.position_y + win.height - 2;
-                ansi::move_to(&mut out, cursor_x, cursor_y);
-                write!(&mut out, "{:<width$}", display, width = max_len).unwrap();
-                ansi::move_to(&mut out, cursor_x + cursor_col as u16, cursor_y);
-                ansi::show_cursor(&mut out);
-            }
-        }
-    } else {
-        ansi::hide_cursor(&mut out);
-    }
-    let effective_cursor = cursor_interaction.or_else(|| {
-        let px = pointer.x;
-        let py = pointer.y;
-
-        if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
-            let track_len = (sb_bot - sb_top + 1) as usize;
-            let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
-            let row = (py - sb_top) as usize;
-            return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
-        }
-
-        if px >= tab_x && px < sb_x {
-            if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
-                .find(|&&(_, ty, th)| py >= ty && py < ty + th)
-            {
-                return Some(tab_char_at(
-                    tab_x, tab_y, tab_h,
-                    &applications[app_idx].title,
-                    px, py, scroll_offset,
-                ));
+                let (display, _) = input::input_view(term_input, cursor_pos, max_len);
+                let cursor_x = win.position_x + 1 + prefix_len as u16;
+                let cursor_y = win.position_y + win.height - 2;
+                ansi::move_to(&mut frame_out, cursor_x, cursor_y);
+                write!(&mut frame_out, "{:<width$}", display, width = max_len).unwrap();
             }
         }
 
+        // Attribute-only highlights (hover over the start button, desktop
+        // buttons, the free selection and the pointer over chrome) are drawn
+        // through the stamp writer so their REVERSE style lands in the frame
+        // and the style diff repaints the row.
         let start_end = STATUS_START_X + STATUS_START.len() as u16;
-        if py == h - 2 && px >= STATUS_START_X && px < start_end {
-            return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
+        if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
+            ansi::move_to(&mut frame_out, STATUS_START_X, h - 2);
+            write!(&mut frame_out, "{}{}{}", ansi::REVERSE, STATUS_START, ansi::RESET).unwrap();
         }
 
-        if let Some(d) = desktop_at(px, py, w, h) {
+        if let Some(d) = desktop_at(pointer.x, pointer.y, w, h) {
             let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
             let sep_x  = base_x + (d as u16 - 1) * 4;
-            let offset = px - (sep_x + 1);
-            return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
+            ansi::move_to(&mut frame_out, sep_x + 1, h - 2);
+            write!(&mut frame_out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
         }
 
-        if let Some(top_idx) = topmost_window_at(applications, current_desktop, px, py) {
-            if let Some(win) = applications[top_idx].window() {
-                if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
-                    return Some(ch);
+        // Free screen selection: invert every cell of the box.
+        if let Some(sel) = selection {
+            let (top, bottom, left, right) = sel.bounds();
+            for y in top..=bottom.min(h as usize - 1) {
+                for x in left..=right.min(w as usize - 1) {
+                    let ch = frame_out.grid().char_at(x, y);
+                    ansi::move_to(&mut frame_out, x as u16, y as u16);
+                    write!(&mut frame_out, "{}{}{}", ansi::REVERSE, ch, ansi::RESET).unwrap();
                 }
             }
         }
 
-        None
-    });
+        // Pointer: reversed when hovering interactive chrome, plain "░"
+        // elsewhere. Hidden while typing in the dock or editing a line-mode
+        // terminal (the caret marks the position there); inside an interactive
+        // app it appears only while the mouse is in use so it does not stack
+        // on the app's own cursor.
+        if draw_pointer {
+            let ec = effective_cursor(
+                applications,
+                current_desktop,
+                pointer,
+                w,
+                h,
+                &tabs,
+                sb_x,
+                sb_top,
+                sb_bot,
+                scroll_offset,
+                tab_scroll,
+                minimized_count,
+                cursor_interaction,
+            );
+            pointer.draw(&mut frame_out, ec);
+        }
+    }
 
-    if let Some(sel) = selection {
-        // Free screen selection overlay: invert every cell of the box.
-        let (top, bottom, left, right) = sel.bounds();
-        for y in top..=bottom {
-            for x in left..=right {
-                let ch = out.grid().char_at(x, y);
-                ansi::move_to(&mut out, x as u16, y as u16);
-                write!(&mut out, "{}{}{}", ansi::REVERSE, ch, ansi::RESET).unwrap();
+    // Emit only the changed rows, then refresh the backing grid for selection
+    // copy and the next frame's diff.
+    emit_frame_diff(out, grid, &frame, full_redraw);
+
+    // Caret: show over the input field when editing, hide otherwise.
+    match caret_position(&typing_input, &focused_terminal, applications, current_desktop, w, h) {
+        Some((cx, cy)) => {
+            ansi::move_to(out, cx, cy);
+            ansi::show_cursor(out);
+        }
+        None => ansi::hide_cursor(out),
+    }
+
+    *grid = frame;
+    out.flush().unwrap();
+}
+
+/// Where the text caret should be drawn, or None to hide the cursor.
+fn caret_position(
+    typing_input: &Option<(&str, usize)>,
+    focused_terminal: &Option<(usize, &str, usize)>,
+    applications: &[Application],
+    current_desktop: usize,
+    w: u16,
+    h: u16,
+) -> Option<(u16, u16)> {
+    if let Some((input, cursor_pos)) = typing_input {
+        let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
+        let (_, cursor_col) = input::input_view(input, *cursor_pos, max_len);
+        return Some((CMD_INPUT_X + cursor_col as u16, h - 2));
+    }
+    if let Some((term_idx, term_input, cursor_pos)) = focused_terminal {
+        let interactive_mode = applications.get(*term_idx)
+            .and_then(|a| a.terminal.as_ref())
+            .map_or(false, |t| t.interactive);
+        if interactive_mode {
+            return None;
+        }
+        if let Some(win) = applications.get(*term_idx)
+            .filter(|a| a.on_desktop(current_desktop))
+            .and_then(|a| a.window())
+        {
+            if win.height >= 5 {
+                let repl = applications.get(*term_idx)
+                    .and_then(|a| a.terminal.as_ref())
+                    .and_then(|t| t.repl_prompt.clone());
+                let prefix = repl.as_deref().unwrap_or(TERMINAL_INPUT_PREFIX);
+                let prefix_len = prefix.chars().count();
+                let inner_w    = (win.width - 2) as usize;
+                let max_len    = inner_w.saturating_sub(prefix_len);
+                let (_, cursor_col) = input::input_view(term_input, *cursor_pos, max_len);
+                let cursor_x = win.position_x + 1 + prefix_len as u16;
+                let cursor_y = win.position_y + win.height - 2;
+                return Some((cursor_x + cursor_col as u16, cursor_y));
+            }
+        }
+    }
+    None
+}
+
+/// The transient character under the pointer (hover over tabs, the start
+/// button, desktop buttons, window chrome, scrollbars).
+fn effective_cursor(
+    applications: &[Application],
+    current_desktop: usize,
+    pointer: &Pointer,
+    w: u16,
+    h: u16,
+    tabs: &[(usize, u16, u16)],
+    sb_x: u16,
+    sb_top: u16,
+    sb_bot: u16,
+    scroll_offset: usize,
+    tab_scroll: usize,
+    minimized_count: usize,
+    cursor_interaction: Option<char>,
+) -> Option<char> {
+    let px = pointer.x;
+    let py = pointer.y;
+
+    if minimized_count > tabs.len() && px == sb_x && py >= sb_top && py <= sb_bot {
+        let track_len = (sb_bot - sb_top + 1) as usize;
+        let (thumb_pos, thumb_len) = scrollbar_thumb(track_len, minimized_count, tabs.len(), tab_scroll);
+        let row = (py - sb_top) as usize;
+        return Some(if row >= thumb_pos && row < thumb_pos + thumb_len { '█' } else { '░' });
+    }
+
+    let tab_x = w.saturating_sub(3);
+    if px >= tab_x && px < sb_x {
+        if let Some(&(app_idx, tab_y, tab_h)) = tabs.iter()
+            .find(|&&(_, ty, th)| py >= ty && py < ty + th)
+        {
+            return Some(tab_char_at(
+                tab_x, tab_y, tab_h,
+                &applications[app_idx].title,
+                px, py, scroll_offset,
+            ));
+        }
+    }
+
+    let start_end = STATUS_START_X + STATUS_START.len() as u16;
+    if py == h - 2 && px >= STATUS_START_X && px < start_end {
+        return Some(STATUS_START.chars().nth((px - STATUS_START_X) as usize).unwrap_or(' '));
+    }
+
+    if let Some(d) = desktop_at(px, py, w, h) {
+        let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
+        let sep_x  = base_x + (d as u16 - 1) * 4;
+        let offset = px - (sep_x + 1);
+        return Some(if offset == 1 { char::from_digit(d as u32, 10).unwrap_or(' ') } else { ' ' });
+    }
+
+    if let Some(top_idx) = topmost_window_at(applications, current_desktop, px, py) {
+        if let Some(win) = applications[top_idx].window() {
+            if let Some(ch) = win.char_at(px, py, &applications[top_idx].title) {
+                return Some(ch);
             }
         }
     }
 
-    if !input_active {
-        pointer.draw(&mut out, effective_cursor);
-    }
+    cursor_interaction
+}
 
-    out.flush().unwrap();
+/// Damage-based frame emission: for every row whose characters or styles
+/// changed, rewrite the whole row at its screen position, carrying the
+/// per-cell style (colors, attributes, reverse) through minimal SGR
+/// transitions. On a size change the screen is cleared first.
+fn emit_frame_diff<W: std::io::Write>(
+    out: &mut W,
+    prev: &ScreenGrid,
+    next: &ScreenGrid,
+    full_redraw: bool,
+) {
+    use crate::terminal_emulator::Style;
+    let (w, h) = (next.width(), next.height());
+    if full_redraw || prev.width() != w || prev.height() != h {
+        ansi::clear(out);
+    }
+    for y in 0..h {
+        let row_changed = (0..w).any(|x| {
+            prev.char_at(x, y) != next.char_at(x, y)
+                || prev.style_at(x, y) != next.style_at(x, y)
+        });
+        if !row_changed {
+            continue;
+        }
+        ansi::move_to(out, 0, y as u16);
+        let mut prev_style: Option<Style> = None;
+        for x in 0..w {
+            let cell = next.cell_at(x, y);
+            ansi::sgr(out, prev_style.as_ref(), &cell.style);
+            write!(out, "{}", cell.ch).unwrap();
+            prev_style = Some(cell.style);
+        }
+        // Reset the trailing style so the next row starts clean.
+        ansi::sgr(out, prev_style.as_ref(), &Style::default());
+    }
 }
 
 pub fn compute_render_state(
@@ -314,7 +452,7 @@ mod tests {
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, focused_term,
-            &mut grid, None,
+            &mut grid, None, 1, false, true,
         );
 
         let bad = out_of_bounds_moves(&buf, w, h);
@@ -344,7 +482,7 @@ mod tests {
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, None,
-            &mut grid, None,
+            &mut grid, None, 1, false, true,
         );
         let bad = out_of_bounds_moves(&buf, w, h);
         assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");
@@ -387,9 +525,73 @@ mod tests {
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, Some((0, "", 0)),
-            &mut grid, None,
+            &mut grid, None, 1, false, true,
         );
         let bad = out_of_bounds_moves(&buf, w, h);
         assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");
     }
+
+    #[test]
+    fn emit_diff_rewrites_only_changed_rows() {
+        use super::emit_frame_diff;
+        let mut prev = crate::ui::screen::ScreenGrid::new(5, 3);
+        let mut next = crate::ui::screen::ScreenGrid::new(5, 3);
+        for y in 0..3 {
+            for x in 0..5 {
+                let ch = if (x, y) == (2, 1) { 'Z' } else { 'a' };
+                prev.set_cell(x, y, 'a');
+                next.set_cell(x, y, ch);
+            }
+        }
+
+        let mut buf = Vec::new();
+        emit_frame_diff(&mut buf, &prev, &next, false);
+        let s = String::from_utf8_lossy(&buf);
+
+        assert!(s.contains("\u{1b}[2;1H"), "changed row must be repositioned");
+        assert!(s.contains('Z'), "changed cell must be emitted");
+        assert!(!s.contains("\u{1b}[2J"), "no full-screen clear on a normal frame");
+        // Only the changed row is written: 4 identical cells + the 'Z'.
+        assert_eq!(s.matches('a').count(), 4, "unchanged rows must be skipped");
+    }
+
+    #[test]
+    fn emit_diff_clears_on_full_redraw_request() {
+        use super::emit_frame_diff;
+        let prev = crate::ui::screen::ScreenGrid::new(5, 3);
+        let next = crate::ui::screen::ScreenGrid::new(5, 3);
+        let mut buf = Vec::new();
+        emit_frame_diff(&mut buf, &prev, &next, true);
+        assert!(String::from_utf8_lossy(&buf).contains("\u{1b}[2J"));
+    }
+
+    #[test]
+    fn emit_diff_repaints_style_change_on_same_char() {
+        // Same character in both frames, but one cell gains a REVERSE style:
+        // the row must still be re-emitted (hovers are attribute-only).
+        use super::emit_frame_diff;
+        use crate::terminal_emulator::{Attributes, Cell};
+
+        let mut prev = crate::ui::screen::ScreenGrid::new(3, 2);
+        let mut next = crate::ui::screen::ScreenGrid::new(3, 2);
+        for y in 0..2 {
+            for x in 0..3 {
+                prev.set_cell(x, y, 'x');
+                next.set_cell(x, y, 'x');
+            }
+        }
+        let mut highlighted = Cell::default();
+        highlighted.ch = 'x';
+        highlighted.style.attrs.set(Attributes::REVERSE, true);
+        next.put(1, 0, highlighted); // (x=1, row 0) gains reverse
+
+        let mut buf = Vec::new();
+        emit_frame_diff(&mut buf, &prev, &next, false);
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("\u{1b}[1;1H"), "row with a style toggle is emitted");
+        assert!(s.contains("\u{1b}[7m"), "flagged cell is rendered inverted");
+        assert!(!s.contains("\u{1b}[2J"), "no full clear for an attribute-only change");
+    }
 }
+
+

@@ -7,9 +7,10 @@ use std::time::Duration;
 use super::terminal::{default_shell, is_interactive_app, split_interactive_flag};
 use super::Application;
 use crate::cmd::{tick_all, CommandEntry};
+use crate::config::{Action, Config};
 use crate::input::{self, History};
 use crate::menu::{self, MenuItem, MenuKind};
-use crate::os::{self, Clock, Key};
+use crate::os::{self, Clock, Key, MouseAction, MouseButton, MouseEvent};
 use crate::ui::pointer::Pointer;
 use crate::ui::{compute_render_state, desktop_at, render, CMD_INPUT_X, STATUS_BAR_PREFIX,
                 STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
@@ -47,6 +48,17 @@ pub struct Desktop {
     pub sel_pos: Option<(u16, u16)>,
     /// Manto clipboard (in-memory), synced to the OS clipboard on copy.
     pub clipboard: String,
+    /// User configuration (theme + remappable shortcuts).
+    pub config: Config,
+    /// Force a full clear on the next frame (host terminal resized).
+    pub full_redraw: bool,
+    /// When the mouse was last used; gates pointer visibility in interactive
+    /// apps so it does not double with the app's own cursor.
+    pub last_mouse: Option<Clock>,
+    /// Master switch for pointer events (Ctrl+M toggles). When off, mouse
+    /// input is ignored entirely and the pointer is driven only by the
+    /// keyboard.
+    pub mouse_enabled: bool,
     /// Set when the user requests quit (Ctrl+Delete).
     pub quit: bool,
 }
@@ -59,8 +71,40 @@ impl Desktop {
         let last_size = os::size();
         let pointer = Pointer::new(1 + STATUS_BAR_PREFIX.len() as u16, last_size.1 - 2);
 
+        let config = Config::load();
+
+        // Restore the saved desktop layout (window geometry + active desktop).
         let mut applications = Vec::new();
         sync_terminal_window_metrics(&mut applications);
+        let mut current_desktop = 1;
+        if let Some(session) = crate::session::load() {
+            current_desktop = session.current_desktop.clamp(1, crate::ui::DESKTOP_COUNT);
+            let mut next_id = 1usize;
+            for saved in session.apps {
+                let w = saved.w.clamp(crate::ui::window::MIN_W, last_size.0.saturating_sub(2).max(5));
+                let h = saved.h.clamp(crate::ui::window::MIN_H, last_size.1.saturating_sub(4).max(3));
+                let x = saved.x.min(last_size.0.saturating_sub(w));
+                let y = saved.y.min(last_size.1.saturating_sub(h + 3));
+                let cwd = if crate::session::path_exists(&saved.path) {
+                    saved.path.clone()
+                } else {
+                    current_path.clone()
+                };
+                let idx = crate::wm::spawn_terminal_window_at(
+                    &mut applications,
+                    &mut next_id,
+                    saved.desktop.clamp(1, crate::ui::DESKTOP_COUNT),
+                    x, y, w, h,
+                    &cwd,
+                    Vec::new(),
+                );
+                if let Some(app) = applications.get_mut(idx) {
+                    app.title = saved.title;
+                }
+            }
+        }
+        sync_terminal_window_metrics(&mut applications);
+        let next_terminal_id = applications.len().saturating_add(1).max(1);
 
         let history = History::new();
         let loaded_history = history.load(1000);
@@ -78,8 +122,8 @@ impl Desktop {
             scroll_offset: 0,
             tab_scroll: 0,
             panel_scroll: 0,
-            current_desktop: 1,
-            next_terminal_id: 1,
+            current_desktop,
+            next_terminal_id,
             last_space_time: None,
             current_path,
             cmd_input: String::new(),
@@ -95,6 +139,10 @@ impl Desktop {
             sel: None,
             sel_pos: None,
             clipboard: String::new(),
+            config,
+            full_redraw: true,
+            last_mouse: None,
+            mouse_enabled: true,
             quit: false,
         }
     }
@@ -108,6 +156,7 @@ impl Desktop {
         let focused_term = if let Mode::TerminalFocus { app_idx } = &self.mode {
             self.applications.get(*app_idx).and_then(|a| a.terminal.as_ref()).map(|t| (*app_idx, t.cmd_input.as_str(), t.input_cursor))
         } else { None };
+        let draw_pointer = self.draw_pointer();
         render(
             out,
             &self.applications,
@@ -126,7 +175,34 @@ impl Desktop {
             focused_term,
             &mut self.screen,
             self.sel.as_ref(),
+            self.config.theme,
+            self.full_redraw,
+            draw_pointer,
         );
+        self.full_redraw = false;
+    }
+
+    /// Whether to draw the Manto pointer this frame. Hidden while typing in
+    /// the dock or editing a line-mode terminal (a caret marks the position).
+    /// Inside an interactive app it is shown only when the mouse has moved
+    /// recently, so it does not double with the app's own cursor.
+    fn draw_pointer(&self) -> bool {
+        match &self.mode {
+            Mode::Typing => false,
+            Mode::TerminalFocus { app_idx } => {
+                let interactive = self.applications.get(*app_idx)
+                    .and_then(|a| a.terminal.as_ref())
+                    .map_or(false, |t| t.interactive);
+                interactive && self.mouse_recent()
+            }
+            _ => true,
+        }
+    }
+
+    /// True when the mouse was used within the last few seconds.
+    fn mouse_recent(&self) -> bool {
+        const IDLE: Duration = Duration::from_millis(3000);
+        self.last_mouse.as_ref().map(|t| t.elapsed() < IDLE).unwrap_or(false)
     }
 
     /// Extend the free screen selection in `dir`, seeded from the pointer.
@@ -167,8 +243,14 @@ impl Desktop {
     /// Read and handle one key event. Returns true when a redraw is needed.
     pub fn step_input(&mut self) -> bool {
         let key = os::read_key();
-        if matches!(key, Key::CtrlDelete) {
+        // Quit (remappable) both persists the session and leaves the desktop.
+        if self.config.resolve(&key) == Some(Action::Quit) {
+            self.save_session();
             self.quit = true;
+            return false;
+        }
+        // Mouse disabled (Ctrl+M): drop pointer events before handling.
+        if !self.mouse_enabled && matches!(key, Key::Mouse(_)) {
             return false;
         }
 
@@ -226,6 +308,7 @@ impl Desktop {
             self.pointer.y = new_size.1 - (self.last_size.1 - self.pointer.y);
             self.last_size = new_size;
             self.screen.resize(new_size.0, new_size.1);
+            self.full_redraw = true;
             if self.sel.is_some() {
                 self.sel = None; // geometry changed: drop the stale box
             }
@@ -267,6 +350,16 @@ impl Desktop {
             }
         }
 
+        // Pointer events drive the desktop and interactive-terminal forwarding.
+        if let Key::Mouse(ev) = key {
+            return self.handle_mouse(ev);
+        }
+
+        // Remappable desktop shortcuts (theme/shortcuts in ~/.manto/config.json).
+        if let Some(action) = self.config.resolve(&key) {
+            return self.run_action(action);
+        }
+
         // Start menu open on this desktop: Up/Down navigate the entries,
         // Enter launches the selected one, Esc/Ctrl+D close. Other keys fall
         // through to the normal handler.
@@ -300,89 +393,6 @@ impl Desktop {
                     mode_changed = true;
                 }
             }
-            Key::CtrlF => {
-                if toggle_active_maximize(&mut self.applications, &self.mode, self.current_desktop, self.last_size.0, self.last_size.1) {
-                    mode_changed = true;
-                }
-            }
-            Key::CtrlN => {
-                if focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, false) {
-                    mode_changed = true;
-                }
-            }
-            Key::CtrlP => {
-                if focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, true) {
-                    mode_changed = true;
-                }
-            }
-            Key::CtrlW => {
-                if let Some(idx) = wm::active_window_idx(&self.applications, &self.mode, self.current_desktop) {
-                    if self.applications[idx].terminal.is_some() {
-                        if let Some(t) = self.applications[idx].terminal.as_mut() {
-                            if let Some(mut session) = t.shell_session.take() {
-                                session.kill();
-                            }
-                        }
-                    }
-                }
-                if close_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.1, &mut self.tab_scroll) {
-                    mode_changed = true;
-                }
-            }
-
-            Key::CtrlT => {
-                let app_idx = spawn_terminal_window(
-                    &mut self.applications,
-                    &mut self.next_terminal_id,
-                    self.current_desktop,
-                    self.last_size.0,
-                    self.last_size.1,
-                    &self.current_path,
-                    Vec::new(),
-                );
-                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
-                self.mode = Mode::TerminalFocus { app_idx };
-                mode_changed = true;
-            }
-            Key::AltR => {
-                if enter_active_resize_mode(
-                    &self.applications,
-                    &mut self.mode,
-                    self.current_desktop,
-                    &mut self.pointer,
-                    self.last_size.0,
-                    self.last_size.1,
-                ) {
-                    mode_changed = true;
-                }
-            }
-            Key::AltV => {
-                if let Some(app_idx) = split_active_terminal_window(
-                    &mut self.applications,
-                    &mut self.mode,
-                    &mut self.next_terminal_id,
-                    self.current_desktop,
-                    wm::SplitDirection::Vertical,
-                ) {
-                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
-                    self.mode = Mode::TerminalFocus { app_idx };
-                    mode_changed = true;
-                }
-            }
-            Key::AltH => {
-                if let Some(app_idx) = split_active_terminal_window(
-                    &mut self.applications,
-                    &mut self.mode,
-                    &mut self.next_terminal_id,
-                    self.current_desktop,
-                    wm::SplitDirection::Horizontal,
-                ) {
-                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
-                    self.mode = Mode::TerminalFocus { app_idx };
-                    mode_changed = true;
-                }
-            }
-
             Key::CtrlC => {
                 // Free screen selection copies with Ctrl+C.
                 if self.copy_screen_selection() {
@@ -465,17 +475,6 @@ impl Desktop {
                 }
                 mode_changed = true;
             }
-            Key::CtrlD => {
-                if toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load()) {
-                    self.park_pointer_on_start_menu();
-                    mode_changed = true;
-                }
-            }
-            Key::CtrlX => {
-                if minimize_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.1, &mut self.tab_scroll) {
-                    mode_changed = true;
-                }
-            }
             Key::Up    => self.pointer.move_up(),
             Key::Down  => self.pointer.move_down(self.last_size.1),
             Key::Left  => self.pointer.move_left(),
@@ -495,197 +494,485 @@ impl Desktop {
             }
 
             Key::Char(' ') | Key::Enter => {
-                let sb_x   = self.last_size.0.saturating_sub(1);
-                let sb_top = 1u16;
-                let sb_bot = self.last_size.1.saturating_sub(4);
-                let tab_x  = self.last_size.0.saturating_sub(3);
-
-                if let Some(d) = desktop_at(self.pointer.x, self.pointer.y, self.last_size.0, self.last_size.1) {
-                    self.current_desktop = d;
-                    self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                    if !wm::mode_targets_desktop(&self.mode, &self.applications, self.current_desktop) {
-                        self.mode = Mode::Normal;
-                    }
+                if self.space_action() {
                     mode_changed = true;
-                } else if self.pointer.y == self.last_size.1 - 2
-                    && self.pointer.x >= CMD_INPUT_X.saturating_sub(TERMINAL_INPUT_PREFIX.len() as u16)
-                {
-                    self.mode = Mode::Typing;
-                    self.panel_scroll = 0;
-                    mode_changed = true;
-                } else {
-                    let start_end = STATUS_START_X + STATUS_START.len() as u16;
-                    if self.pointer.y == self.last_size.1 - 2
-                        && self.pointer.x >= STATUS_START_X
-                        && self.pointer.x < start_end
-                    {
-                        toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load());
-                        self.park_pointer_on_start_menu();
-                        mode_changed = true;
-                    } else if self.pointer.x == sb_x {
-                        self.last_space_time = None;
-                        let mid = (sb_top + sb_bot) / 2;
-                        if self.pointer.y <= mid {
-                            self.tab_scroll = self.tab_scroll.saturating_sub(1);
-                        } else {
-                            self.tab_scroll = (self.tab_scroll + 1)
-                                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                        }
-                        mode_changed = true;
-                    } else if self.pointer.x >= tab_x {
-                        self.last_space_time = None;
-                        let on_tab = tab_layout(&self.applications, self.current_desktop, self.last_size.1, self.tab_scroll)
-                            .into_iter()
-                            .find(|&(_, ty, th)| self.pointer.y >= ty && self.pointer.y < ty + th)
-                            .map(|(idx, _, _)| idx);
-
-                        if let Some(app_idx) = on_tab {
-                            self.applications[app_idx].restore();
-                            let restored_idx = bring_window_to_front(&mut self.applications, app_idx);
-                            self.tab_scroll = self.tab_scroll
-                                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                            if self.applications[restored_idx].terminal.is_some() {
-                                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, restored_idx, self.last_size.0, self.last_size.1);
-                                self.mode = Mode::TerminalFocus { app_idx: restored_idx };
-                            }
-                            mode_changed = true;
-                        }
-                    } else if let Some(top_idx) =
-                        topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
-                    {
-                        let mut skip = false;
-                        if let Some(menu_idx) = self.applications.iter().position(|a| a.on_desktop(self.current_desktop) && a.is_menu) {
-                            if top_idx != menu_idx {
-                                self.applications.remove(menu_idx);
-                                self.tab_scroll = self.tab_scroll
-                                    .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                                mode_changed = true;
-                                skip = true;
-                            }
-                        }
-                        if !skip {
-                            let scroll_handled = if let Some(app) = self.applications.get_mut(top_idx) {
-                                let handled = if let Some(win) = app.window_mut() {
-                                    win.interact(self.pointer.x, self.pointer.y)
-                                } else {
-                                    false
-                                };
-                                handled || wm::interact_terminal_horizontal_scroll(app, self.pointer.x, self.pointer.y)
-                                    || wm::interact_terminal_vertical_scroll(app, self.pointer.x, self.pointer.y)
-                            } else {
-                                false
-                            };
-                            if scroll_handled {
-                                mode_changed = true;
-                            }
-
-                            let is_terminal_input = {
-                                let app = &self.applications[top_idx];
-                                app.terminal.is_some() && app.window().map_or(false, |win| {
-                                    let has_hscroll = win.content_w as usize > win.width.saturating_sub(2) as usize;
-                                    win.height >= 5
-                                        && self.pointer.y == win.position_y + win.height.saturating_sub(if has_hscroll { 3 } else { 2 })
-                                        && self.pointer.x > win.position_x
-                                        && self.pointer.x < win.position_x + win.width - 1
-                                })
-                            };
-                            if is_terminal_input && !scroll_handled {
-                                if top_idx != self.applications.len() - 1 {
-                                    let app = self.applications.remove(top_idx);
-                                    self.applications.push(app);
-                                }
-                                let final_idx = self.applications.len() - 1;
-                                // Interactive sessions keep the pointer where it
-                                // was placed (it anchors the box selection).
-                                let interactive = self.applications[final_idx]
-                                    .terminal.as_ref().map_or(false, |t| t.interactive);
-                                if !interactive {
-                                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, final_idx, self.last_size.0, self.last_size.1);
-                                }
-                                self.mode = Mode::TerminalFocus { app_idx: final_idx };
-                                mode_changed = true;
-                            }
-
-                            if !scroll_handled && !is_terminal_input {
-                                let (is_minimize, is_close, is_resize, is_title, offset_x,
-                                     win_minimizable, win_closable, win_draggable, win_resizable) = {
-                                    let win = self.applications[top_idx].window().unwrap();
-                                    let lx = win.position_x;
-                                    let rx = win.position_x + win.width - 1;
-                                    let ty = win.position_y;
-                                    let by = win.position_y + win.height - 1;
-                                    (
-                                        self.pointer.x == lx && self.pointer.y == ty,
-                                        self.pointer.x == rx && self.pointer.y == ty,
-                                        self.pointer.x == rx && self.pointer.y == by,
-                                        self.pointer.y == ty && self.pointer.x > lx && self.pointer.x < rx,
-                                        self.pointer.x.saturating_sub(lx),
-                                        win.minimizable,
-                                        win.closable,
-                                        win.draggable,
-                                        win.resizable,
-                                    )
-                                };
-                                let maximized = self.applications[top_idx].is_maximized();
-
-                                if is_minimize && win_minimizable {
-                                    self.applications[top_idx].minimize();
-                                    mode_changed = true;
-                                } else if is_close && win_closable {
-                                    if let Some(t) = self.applications[top_idx].terminal.as_mut() {
-                                        if let Some(mut session) = t.shell_session.take() {
-                                            session.kill();
-                                        }
-                                    }
-                                    self.applications.remove(top_idx);
-                                    self.tab_scroll = self.tab_scroll
-                                        .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                                    mode_changed = true;
-                                } else if is_resize && !maximized && win_resizable {
-                                    self.mode = Mode::Resizing { app_idx: top_idx, edit: None };
-                                    mode_changed = true;
-                                } else if is_title && win_draggable {
-                                    let now = Clock::now();
-                                    let is_double = self.last_space_time
-                                        .as_ref()
-                                        .map(|t| t.elapsed() < Duration::from_millis(300))
-                                        .unwrap_or(false);
-                                    self.last_space_time = if is_double { None } else { Some(now) };
-
-                                    if is_double {
-                                        if maximized {
-                                            self.applications[top_idx].restore_maximize();
-                                        } else {
-                                            self.applications[top_idx].maximize(self.last_size.0, self.last_size.1);
-                                        }
-                                        mode_changed = true;
-                                    } else if !maximized {
-                                        let final_idx = if top_idx != self.applications.len() - 1 {
-                                            let app = self.applications.remove(top_idx);
-                                            self.applications.push(app);
-                                            self.applications.len() - 1
-                                        } else {
-                                            top_idx
-                                        };
-                                        self.mode = Mode::Moving { app_idx: final_idx, offset_x };
-                                        mode_changed = true;
-                                    }
-                                } else {
-                                    self.last_space_time = None;
-                                    if top_idx != self.applications.len() - 1 {
-                                        let app = self.applications.remove(top_idx);
-                                        self.applications.push(app);
-                                        mode_changed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
             _ => {}
         }
         mode_changed
+    }
+
+    /// Click/focus action at the pointer position: switch desktops, open the
+    /// typing bar, toggle the start menu, scroll tabs, restore a tab, or
+    /// interact with the topmost window (scroll, focus, enter terminal input,
+    /// drag / resize / minimize / close). Shared by Space/Enter and the mouse.
+    fn space_action(&mut self) -> bool {
+        let mut mode_changed = false;
+        let sb_x   = self.last_size.0.saturating_sub(1);
+        let sb_top = 1u16;
+        let sb_bot = self.last_size.1.saturating_sub(4);
+        let tab_x  = self.last_size.0.saturating_sub(3);
+
+        if let Some(d) = desktop_at(self.pointer.x, self.pointer.y, self.last_size.0, self.last_size.1) {
+            self.current_desktop = d;
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            if !wm::mode_targets_desktop(&self.mode, &self.applications, self.current_desktop) {
+                self.mode = Mode::Normal;
+            }
+            mode_changed = true;
+        } else if self.pointer.y == self.last_size.1 - 2
+            && self.pointer.x >= CMD_INPUT_X.saturating_sub(TERMINAL_INPUT_PREFIX.len() as u16)
+        {
+            self.mode = Mode::Typing;
+            self.panel_scroll = 0;
+            mode_changed = true;
+        } else {
+            let start_end = STATUS_START_X + STATUS_START.len() as u16;
+            if self.pointer.y == self.last_size.1 - 2
+                && self.pointer.x >= STATUS_START_X
+                && self.pointer.x < start_end
+            {
+                toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load());
+                self.park_pointer_on_start_menu();
+                mode_changed = true;
+            } else if self.pointer.x == sb_x {
+                self.last_space_time = None;
+                let mid = (sb_top + sb_bot) / 2;
+                if self.pointer.y <= mid {
+                    self.tab_scroll = self.tab_scroll.saturating_sub(1);
+                } else {
+                    self.tab_scroll = (self.tab_scroll + 1)
+                        .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                }
+                mode_changed = true;
+            } else if self.pointer.x >= tab_x {
+                self.last_space_time = None;
+                let on_tab = tab_layout(&self.applications, self.current_desktop, self.last_size.1, self.tab_scroll)
+                    .into_iter()
+                    .find(|&(_, ty, th)| self.pointer.y >= ty && self.pointer.y < ty + th)
+                    .map(|(idx, _, _)| idx);
+
+                if let Some(app_idx) = on_tab {
+                    self.applications[app_idx].restore();
+                    let restored_idx = bring_window_to_front(&mut self.applications, app_idx);
+                    self.tab_scroll = self.tab_scroll
+                        .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                    if self.applications[restored_idx].terminal.is_some() {
+                        place_pointer_on_terminal_input(&mut self.pointer, &self.applications, restored_idx, self.last_size.0, self.last_size.1);
+                        self.mode = Mode::TerminalFocus { app_idx: restored_idx };
+                    }
+                    mode_changed = true;
+                }
+            } else if let Some(top_idx) =
+                topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
+            {
+                let mut skip = false;
+                if let Some(menu_idx) = self.applications.iter().position(|a| a.on_desktop(self.current_desktop) && a.is_menu) {
+                    if top_idx != menu_idx {
+                        self.applications.remove(menu_idx);
+                        self.tab_scroll = self.tab_scroll
+                            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                        mode_changed = true;
+                        skip = true;
+                    }
+                }
+                if !skip {
+                    let scroll_handled = if let Some(app) = self.applications.get_mut(top_idx) {
+                        let handled = if let Some(win) = app.window_mut() {
+                            win.interact(self.pointer.x, self.pointer.y)
+                        } else {
+                            false
+                        };
+                        handled || wm::interact_terminal_horizontal_scroll(app, self.pointer.x, self.pointer.y)
+                            || wm::interact_terminal_vertical_scroll(app, self.pointer.x, self.pointer.y)
+                    } else {
+                        false
+                    };
+                    if scroll_handled {
+                        mode_changed = true;
+                    }
+
+                    let is_terminal_input = {
+                        let app = &self.applications[top_idx];
+                        app.terminal.is_some() && app.window().map_or(false, |win| {
+                            let has_hscroll = win.content_w as usize > win.width.saturating_sub(2) as usize;
+                            win.height >= 5
+                                && self.pointer.y == win.position_y + win.height.saturating_sub(if has_hscroll { 3 } else { 2 })
+                                && self.pointer.x > win.position_x
+                                && self.pointer.x < win.position_x + win.width - 1
+                        })
+                    };
+                    if is_terminal_input && !scroll_handled {
+                        let final_idx = bring_window_to_front(&mut self.applications, top_idx);
+                        // Interactive sessions keep the pointer where it
+                        // was placed (it anchors the box selection).
+                        let interactive = self.applications[final_idx]
+                            .terminal.as_ref().map_or(false, |t| t.interactive);
+                        if !interactive {
+                            place_pointer_on_terminal_input(&mut self.pointer, &self.applications, final_idx, self.last_size.0, self.last_size.1);
+                        }
+                        self.mode = Mode::TerminalFocus { app_idx: final_idx };
+                        mode_changed = true;
+                    }
+
+                    if !scroll_handled && !is_terminal_input {
+                        let (is_minimize, is_close, is_resize, is_title, offset_x,
+                             win_minimizable, win_closable, win_draggable, win_resizable) = {
+                            let win = self.applications[top_idx].window().unwrap();
+                            let lx = win.position_x;
+                            let rx = win.position_x + win.width - 1;
+                            let ty = win.position_y;
+                            let by = win.position_y + win.height - 1;
+                            (
+                                self.pointer.x == lx && self.pointer.y == ty,
+                                self.pointer.x == rx && self.pointer.y == ty,
+                                self.pointer.x == rx && self.pointer.y == by,
+                                self.pointer.y == ty && self.pointer.x > lx && self.pointer.x < rx,
+                                self.pointer.x.saturating_sub(lx),
+                                win.minimizable,
+                                win.closable,
+                                win.draggable,
+                                win.resizable,
+                            )
+                        };
+                        let maximized = self.applications[top_idx].is_maximized();
+
+                        if is_minimize && win_minimizable {
+                            self.applications[top_idx].minimize();
+                            mode_changed = true;
+                        } else if is_close && win_closable {
+                            if let Some(t) = self.applications[top_idx].terminal.as_mut() {
+                                if let Some(mut session) = t.shell_session.take() {
+                                    session.kill();
+                                }
+                            }
+                            self.applications.remove(top_idx);
+                            self.tab_scroll = self.tab_scroll
+                                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                            mode_changed = true;
+                        } else if is_resize && !maximized && win_resizable {
+                            self.mode = Mode::Resizing { app_idx: top_idx, edit: None };
+                            mode_changed = true;
+                        } else if is_title && win_draggable {
+                            let now = Clock::now();
+                            let is_double = self.last_space_time
+                                .as_ref()
+                                .map(|t| t.elapsed() < Duration::from_millis(300))
+                                .unwrap_or(false);
+                            self.last_space_time = if is_double { None } else { Some(now) };
+
+                            if is_double {
+                                if maximized {
+                                    self.applications[top_idx].restore_maximize();
+                                } else {
+                                    self.applications[top_idx].maximize(self.last_size.0, self.last_size.1);
+                                }
+                                mode_changed = true;
+                            } else if !maximized {
+                                let final_idx = bring_window_to_front(&mut self.applications, top_idx);
+                                self.mode = Mode::Moving { app_idx: final_idx, offset_x };
+                                mode_changed = true;
+                            }
+                        } else {
+                            self.last_space_time = None;
+                            if top_idx != self.applications.len() - 1 {
+                                bring_window_to_front(&mut self.applications, top_idx);
+                                mode_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        mode_changed
+    }
+
+    /// Dispatch a remappable desktop shortcut (from ~/.manto/config.json).
+    fn run_action(&mut self, action: Action) -> bool {
+        match action {
+            Action::NewTerminal => {
+                let app_idx = spawn_terminal_window(
+                    &mut self.applications,
+                    &mut self.next_terminal_id,
+                    self.current_desktop,
+                    self.last_size.0,
+                    self.last_size.1,
+                    &self.current_path,
+                    Vec::new(),
+                );
+                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                self.mode = Mode::TerminalFocus { app_idx };
+                true
+            }
+            Action::CloseWindow => {
+                if let Some(idx) = wm::active_window_idx(&self.applications, &self.mode, self.current_desktop) {
+                    if self.applications[idx].terminal.is_some() {
+                        if let Some(t) = self.applications[idx].terminal.as_mut() {
+                            if let Some(mut session) = t.shell_session.take() {
+                                session.kill();
+                            }
+                        }
+                    }
+                }
+                close_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.1, &mut self.tab_scroll)
+            }
+            Action::ToggleMaximize => toggle_active_maximize(
+                &mut self.applications,
+                &self.mode,
+                self.current_desktop,
+                self.last_size.0,
+                self.last_size.1,
+            ),
+            Action::StartMenu => {
+                if toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load()) {
+                    self.park_pointer_on_start_menu();
+                    true
+                } else {
+                    false
+                }
+            }
+            Action::SplitVertical => {
+                if let Some(app_idx) = split_active_terminal_window(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.next_terminal_id,
+                    self.current_desktop,
+                    wm::SplitDirection::Vertical,
+                ) {
+                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                    self.mode = Mode::TerminalFocus { app_idx };
+                    true
+                } else {
+                    false
+                }
+            }
+            Action::SplitHorizontal => {
+                if let Some(app_idx) = split_active_terminal_window(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.next_terminal_id,
+                    self.current_desktop,
+                    wm::SplitDirection::Horizontal,
+                ) {
+                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                    self.mode = Mode::TerminalFocus { app_idx };
+                    true
+                } else {
+                    false
+                }
+            }
+            Action::Minimize => minimize_active_window(
+                &mut self.applications,
+                &mut self.mode,
+                self.current_desktop,
+                self.last_size.1,
+                &mut self.tab_scroll,
+            ),
+            Action::FocusNext => focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, false),
+            Action::FocusPrev => focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, true),
+            Action::ResizeActive => enter_active_resize_mode(
+                &self.applications,
+                &mut self.mode,
+                self.current_desktop,
+                &mut self.pointer,
+                self.last_size.0,
+                self.last_size.1,
+            ),
+            Action::ToggleMouse => {
+                self.mouse_enabled = !self.mouse_enabled;
+                true
+            }
+            Action::Quit => {
+                self.save_session();
+                self.quit = true;
+                false
+            }
+        }
+    }
+
+    /// Handle a pointer event in desktop (non-interactive) context.
+    fn handle_mouse(&mut self, ev: MouseEvent) -> bool {
+        self.last_mouse = Some(Clock::now());
+        // Translate 1-based terminal coordinates to Manto screen coordinates.
+        let sx = ev.x.saturating_sub(1);
+        let sy = ev.y.saturating_sub(1);
+        let moved = self.pointer.x != sx || self.pointer.y != sy;
+        self.pointer.x = sx;
+        self.pointer.y = sy;
+        self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
+
+        match ev.kind {
+            MouseAction::Move | MouseAction::Drag => {
+                // Hovering over a start-menu entry highlights it.
+                if let Some(menu_idx) = self.start_menu_idx()
+                    && let Some(sel) = self.menu_item_under_pointer(menu_idx)
+                {
+                    self.select_menu_item(menu_idx, sel);
+                    return true;
+                }
+                moved
+            }
+            MouseAction::Release => {
+                let was_dragging = matches!(self.mode, Mode::Moving { .. } | Mode::Resizing { .. });
+                if was_dragging {
+                    if let Mode::Resizing { app_idx, .. } = &self.mode {
+                        let app_idx = *app_idx;
+                        if let Some(win) = self.applications.get_mut(app_idx).and_then(|a| a.window_mut()) {
+                            let (width, height) = wm::resize_preview_size(win, &self.pointer);
+                            win.width = width;
+                            win.height = height;
+                        }
+                    }
+                    self.mode = Mode::Normal;
+                    true
+                } else {
+                    moved
+                }
+            }
+            MouseAction::Press => match ev.button {
+                MouseButton::WheelUp => self.mouse_scroll(true),
+                MouseButton::WheelDown => self.mouse_scroll(false),
+                MouseButton::Left => self.mouse_left_press(),
+                MouseButton::Right => self.mouse_right_press(),
+                MouseButton::Middle => false,
+            },
+        }
+    }
+
+    fn mouse_left_press(&mut self) -> bool {
+        // Clicking a start-menu entry selects and launches it.
+        if let Some(menu_idx) = self.start_menu_idx()
+            && let Some(sel) = self.menu_item_under_pointer(menu_idx)
+        {
+            self.select_menu_item(menu_idx, sel);
+            let item = self.applications.get(menu_idx)
+                .and_then(|a| a.menu.as_ref())
+                .and_then(|s| s.items.get(s.selected))
+                .cloned();
+            self.close_start_menu(menu_idx);
+            if let Some(item) = item {
+                return self.launch_menu_item(&item);
+            }
+            return true;
+        }
+
+        // Clicking the body of an interactive terminal dives into it, so the
+        // next pointer events reach the app.
+        if let Some(top) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
+            && let Some(win) = self.applications.get(top).and_then(|a| a.window())
+            && self.applications[top].terminal.as_ref().map_or(false, |t| t.interactive)
+            && self.pointer.x > win.position_x
+            && self.pointer.x < win.position_x + win.width - 1
+            && self.pointer.y > win.position_y
+            && self.pointer.y < win.position_y + win.height - 1
+        {
+            let idx = bring_window_to_front(&mut self.applications, top);
+            self.mode = Mode::TerminalFocus { app_idx: idx };
+            return true;
+        }
+
+        self.space_action()
+    }
+
+    fn mouse_right_press(&mut self) -> bool {
+        // Right-click focuses (raises) the window under the pointer.
+        if let Some(top_idx) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y) {
+            bring_window_to_front(&mut self.applications, top_idx);
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            self.mode = Mode::Normal;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wheel scrolling: the minimized-window rail (right edge), the terminal
+    /// under the pointer, or the dock command panel.
+    fn mouse_scroll(&mut self, up: bool) -> bool {
+        let sb_x = self.last_size.0.saturating_sub(1);
+        let sb_top = 1u16;
+        let sb_bot = self.last_size.1.saturating_sub(4);
+
+        // Tab / minimization rail on the rightmost column.
+        if self.pointer.x == sb_x && self.pointer.y >= sb_top && self.pointer.y <= sb_bot {
+            let track = (sb_bot - sb_top + 1) as usize;
+            let total = self.applications.iter()
+                .filter(|a| a.on_desktop(self.current_desktop) && a.is_minimized())
+                .count();
+            let tab_h = if (total as u16) * 8 <= (sb_bot - sb_top + 1) { 8 } else { 6 };
+            let visible = (track / (tab_h as usize).max(1)).max(1);
+            if total > visible {
+                self.tab_scroll = if up {
+                    self.tab_scroll.saturating_sub(1)
+                } else {
+                    (self.tab_scroll + 1).min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1))
+                };
+                return true;
+            }
+        }
+
+        // Terminal under the pointer: scroll its scrollback.
+        if let Some(top) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
+            && let Some(t) = self.applications.get_mut(top).and_then(|a| a.terminal.as_mut())
+        {
+            if up {
+                t.panel_scroll = t.panel_scroll.saturating_add(1);
+            } else {
+                t.panel_scroll = t.panel_scroll.saturating_sub(1);
+            }
+            return true;
+        }
+
+        // Dock command panel.
+        if !self.commands.is_empty() {
+            if up {
+                self.panel_scroll = self.panel_scroll.saturating_add(1);
+            } else {
+                self.panel_scroll = self.panel_scroll.saturating_sub(1);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Forward a pointer event to a focused interactive session (SGR), so
+    /// mouse-aware apps (vim, mc, ...) track the pointer as in a terminal.
+    fn forward_mouse(&mut self, app_idx: usize, ev: MouseEvent) -> bool {
+        if let Some(bytes) = crate::app::terminal::mouse_to_bytes(ev) {
+            if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
+                if is_pty {
+                    if let Some(ref mut s) = t.shell_session {
+                        let _ = s.write(&bytes);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Persist the current layout (terminal geometry + active desktop).
+    fn save_session(&self) {
+        let mut session = crate::session::Session {
+            current_desktop: self.current_desktop,
+            apps: Vec::new(),
+        };
+        for app in &self.applications {
+            if app.is_menu { continue; }
+            let Some(terminal) = app.terminal.as_ref() else { continue };
+            let Some(win) = app.window() else { continue };
+            session.apps.push(crate::session::SavedApp {
+                title: app.title.clone(),
+                path: terminal.path.clone(),
+                desktop: app.desktop,
+                x: win.position_x,
+                y: win.position_y,
+                w: win.width,
+                h: win.height,
+            });
+        }
+        crate::session::save(&session);
     }
 
     fn key_typing(&mut self, key: Key) -> bool {
@@ -1157,6 +1444,22 @@ impl Desktop {
                 }
                 true
             }
+            Key::Mouse(ev) => {
+                // A press outside the terminal window returns to the desktop.
+                let inside = self.applications.get(app_idx).and_then(|a| a.window()).map_or(false, |win| {
+                    let x = ev.x.saturating_sub(1);
+                    let y = ev.y.saturating_sub(1);
+                    x >= win.position_x
+                        && x < win.position_x + win.width
+                        && y >= win.position_y
+                        && y < win.position_y + win.height
+                });
+                if !inside {
+                    self.mode = Mode::Normal;
+                    return self.handle_mouse(ev);
+                }
+                self.forward_mouse(app_idx, ev)
+            }
             _ => self.forward_interactive(app_idx, key, false),
         }
     }
@@ -1164,34 +1467,59 @@ impl Desktop {
     /// Forward a key raw to the session, with Manto-side local echo when the
     /// backend has no real PTY.
     fn forward_interactive(&mut self, app_idx: usize, key: Key, enter: bool) -> bool {
-        let backspace = matches!(key, Key::Backspace);
-        let ctrl_c = matches!(key, Key::CtrlC);
-        let bytes = crate::app::terminal::key_to_bytes(key);
-        if let Some(bytes) = bytes {
-            if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
-                if !is_pty {
-                    // Piped fallback: no console to echo or edit. Manto mirrors
-                    // the keystrokes into the emulator and keeps the partial
-                    // line itself, sending the corrected line on Enter — a
-                    // literal backspace byte would otherwise land inside the
-                    // child's input as "U+0008".
-                    if enter {
-                        t.mirror_input(b"\r\n", false);
-                        t.pipe_flush();
-                    } else if backspace {
-                        t.mirror_input(&bytes, true);
-                        t.pipe_backspace();
-                    } else if ctrl_c {
-                        t.mirror_input(b"\r\n", false);
-                        t.pipe_cancel();
-                    } else {
+        let _ = enter;
+        let is_pty = self.applications.get(app_idx)
+            .and_then(|a| a.terminal.as_ref())
+            .and_then(|t| t.shell_session.as_ref())
+            .map(|s| s.is_real_pty())
+            .unwrap_or(false);
+
+        // Real PTY: the child/console handles echo, editing and history.
+        if is_pty {
+            if let Some(bytes) = crate::app::terminal::key_to_bytes(key) {
+                if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                    if let Some(ref mut s) = t.shell_session {
+                        let _ = s.write(&bytes);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Piped fallback: no console to echo/edit/keep history in, so Manto
+        // mirrors the keystrokes, edits the partial line locally and recalls a
+        // local history with Up/Down. A real console would otherwise leak
+        // control bytes into the child or move the emulator's cursor.
+        if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+            match key {
+                Key::Up => {
+                    t.pipe_recall(true);
+                }
+                Key::Down => {
+                    t.pipe_recall(false);
+                }
+                Key::Enter | Key::CtrlEnter => {
+                    t.mirror_input(b"\r\n", false);
+                    t.pipe_flush();
+                }
+                Key::Backspace => {
+                    t.mirror_input(&crate::app::terminal::key_to_bytes(key).unwrap_or_default(), true);
+                    t.pipe_backspace();
+                    t.reset_pipe_history();
+                }
+                Key::CtrlC => {
+                    t.mirror_input(b"\r\n", false);
+                    t.pipe_cancel();
+                }
+                // Navigation/function keys have no meaning on a pipe (no
+                // terminal to interpret them): ignore, don't mirror or send.
+                key if crate::app::terminal::is_terminal_navigation(key) => (),
+                _ => {
+                    if let Some(bytes) = crate::app::terminal::key_to_bytes(key) {
+                        t.reset_pipe_history();
                         t.mirror_input(&bytes, false);
                         t.pipe_feed(&bytes);
                     }
-                } else if let Some(ref mut s) = t.shell_session {
-                    // Real PTY: the child/console handles echo and editing.
-                    let _ = s.write(&bytes);
                 }
             }
         }
@@ -1424,3 +1752,5 @@ impl ModeKind {
         }
     }
 }
+
+

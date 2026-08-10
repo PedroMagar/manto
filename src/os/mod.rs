@@ -50,7 +50,7 @@ impl Clock {
 
 // ── Key ───────────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Char(char),
     Up,
@@ -99,14 +99,53 @@ pub enum Key {
     AltV,
     CtrlEnter,
     CtrlT,
+    CtrlM,
+    Mouse(MouseEvent),
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeldArrowKeys {
     pub up: bool,
     pub down: bool,
     pub left: bool,
     pub right: bool,
+}
+
+// ── Mouse ─────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseAction {
+    /// Button pressed (or wheel scrolled).
+    Press,
+    /// Button released (ends a click/drag).
+    Release,
+    /// Pointer moved without any button held.
+    Move,
+    /// Pointer moved while a button is held (click-drag).
+    Drag,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    /// 1-based column, matching the terminal reports.
+    pub x: u16,
+    /// 1-based row.
+    pub y: u16,
+    pub kind: MouseAction,
+    /// Set for wheel events; for Move/Release events the value is Left.
+    pub button: MouseButton,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
 }
 
 // ── Clipboard bridge (best-effort, no deps) ──────────────────────────────────

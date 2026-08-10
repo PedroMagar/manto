@@ -26,6 +26,7 @@ const ENABLE_PROCESSED_OUTPUT:            Dword = 0x0001;
 
 const WAIT_OBJECT_0:   Dword = 0;
 const KEY_EVENT_TYPE:  Word  = 0x0001;
+const MOUSE_EVENT_TYPE: Word = 0x0002;
 const LEFT_CTRL:       Dword = 0x0008;
 const RIGHT_CTRL:      Dword = 0x0004;
 const LEFT_ALT:        Dword = 0x0002;
@@ -33,6 +34,23 @@ const RIGHT_ALT:       Dword = 0x0001;
 const VK_SHIFT:        i32   = 0x10;
 const GMEM_MOVEABLE:   Dword = 0x0002;
 const CF_UNICODETEXT:  Dword = 13;
+
+// MOUSE_EVENT_RECORD event flags.
+const MOUSE_MOVED:     Dword = 0x0001;
+const MOUSE_WHEELED:   Dword = 0x0004;
+
+// MOUSE_EVENT_RECORD dwButtonState bits.
+const FROM_LEFT_1ST_BUTTON_PRESSED: Dword = 0x0001;
+const RIGHTMOST_BUTTON_PRESSED:     Dword = 0x0002;
+const FROM_LEFT_2ND_BUTTON_PRESSED: Dword = 0x0004;
+
+// MOUSE_EVENT_RECORD dwControlKeyState bits.
+const SHIFT_PRESSED: Dword = 0x0010;
+
+// GetKeyState/GetAsyncKeyState-style: ctrl/alt are read from key state like
+// the keyboard path, so we only need SHIFT here; ctrl/alt use VK values.
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU:    i32 = 0x12;
 
 // INPUT_RECORD: WORD EventType (2) + WORD pad (2) + union Event (16 bytes)
 #[repr(C)]
@@ -84,8 +102,82 @@ fn ke_vk(e: &[u8; 16])       -> u16  { u16::from_ne_bytes([e[6], e[7]]) }
 fn ke_char(e: &[u8; 16])     -> u16  { u16::from_ne_bytes([e[10],e[11]]) }
 fn ke_ctrl(e: &[u8; 16])     -> u32  { u32::from_ne_bytes([e[12],e[13],e[14],e[15]]) }
 
+// MOUSE_EVENT_RECORD layout (inside the 16-byte event union):
+//   dwMousePosition   COORD (Short x@0, Short y@2)
+//   dwButtonState     DWORD @4
+//   dwControlKeyState DWORD @8
+//   dwEventFlags      DWORD @12
+fn me_x(e: &[u8; 16])    -> u16  { i16::from_ne_bytes([e[0], e[1]]) as u16 }
+fn me_y(e: &[u8; 16])    -> u16  { i16::from_ne_bytes([e[2], e[3]]) as u16 }
+fn me_button(e: &[u8;16])-> u32  { u32::from_ne_bytes([e[4],e[5],e[6],e[7]]) }
+fn me_ctrl(e: &[u8;16])  -> u32  { u32::from_ne_bytes([e[8],e[9],e[10],e[11]]) }
+fn me_flags(e: &[u8;16]) -> u32  { u32::from_ne_bytes([e[12],e[13],e[14],e[15]]) }
+
 fn is_key_down(rec: &InputRecord) -> bool {
     rec.event_type == KEY_EVENT_TYPE && ke_key_down(&rec.event)
+}
+
+fn is_mouse(rec: &InputRecord) -> bool {
+    rec.event_type == MOUSE_EVENT_TYPE
+}
+
+/// Decode a MOUSE_EVENT_RECORD into an `os::Key::Mouse`. Coordinates are
+/// 0-based from the console; Manto treats the terminal as the whole screen.
+fn decode_mouse(rec: &InputRecord) -> Key {
+    use super::{MouseAction, MouseButton, MouseEvent};
+
+    let e = &rec.event;
+    let x = me_x(e).saturating_add(1);
+    let y = me_y(e).saturating_add(1);
+    let button_state = me_button(e);
+    let ctrl_state = me_ctrl(e);
+    let flags = me_flags(e);
+
+    // Ctrl/Alt are read live like the keyboard path (this context can lie).
+    let ctrl = unsafe { GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0 };
+    let alt = unsafe { GetKeyState(VK_MENU) as u16 & 0x8000 != 0 };
+    let shift = ctrl_state & SHIFT_PRESSED != 0;
+
+    let pressed = |btn| MouseEvent {
+        x, y,
+        kind: MouseAction::Press,
+        button: btn,
+        shift, ctrl, alt,
+    };
+
+    if flags & MOUSE_WHEELED != 0 {
+        let delta = ((button_state >> 16) as u16) as i16;
+        let button = if delta > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
+        return Key::Mouse(pressed(button));
+    }
+
+    if flags & MOUSE_MOVED != 0 {
+        let held = button_state & (FROM_LEFT_1ST_BUTTON_PRESSED | RIGHTMOST_BUTTON_PRESSED | FROM_LEFT_2ND_BUTTON_PRESSED);
+        if held != 0 {
+            let button = if held & FROM_LEFT_1ST_BUTTON_PRESSED != 0 {
+                MouseButton::Left
+            } else if held & RIGHTMOST_BUTTON_PRESSED != 0 {
+                MouseButton::Right
+            } else {
+                MouseButton::Middle
+            };
+            return Key::Mouse(MouseEvent { x, y, kind: MouseAction::Drag, button, shift, ctrl, alt });
+        }
+        return Key::Mouse(MouseEvent { x, y, kind: MouseAction::Move, button: MouseButton::Left, shift, ctrl, alt });
+    }
+
+    if button_state & FROM_LEFT_1ST_BUTTON_PRESSED != 0 {
+        return Key::Mouse(pressed(MouseButton::Left));
+    }
+    if button_state & RIGHTMOST_BUTTON_PRESSED != 0 {
+        return Key::Mouse(pressed(MouseButton::Right));
+    }
+    if button_state & FROM_LEFT_2ND_BUTTON_PRESSED != 0 {
+        return Key::Mouse(pressed(MouseButton::Middle));
+    }
+
+    // No button and no flags: a button just went up.
+    Key::Mouse(MouseEvent { x, y, kind: MouseAction::Release, button: MouseButton::Left, shift, ctrl, alt })
 }
 
 pub fn enable_raw_mode() {
@@ -96,9 +188,11 @@ pub fn enable_raw_mode() {
         GetConsoleMode(hout, &raw mut ORIG_OUT_MODE);
 
         // No VT input: records are read directly via ReadConsoleInputW.
+        // Mouse stays enabled so MOUSE_EVENT_RECORDs reach read_key.
         let new_in = ORIG_IN_MODE
             & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT
-                | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT);
+                | ENABLE_WINDOW_INPUT)
+            | ENABLE_MOUSE_INPUT;
         SetConsoleMode(hin, new_in);
 
         let new_out = ORIG_OUT_MODE
@@ -106,15 +200,43 @@ pub fn enable_raw_mode() {
             | ENABLE_PROCESSED_OUTPUT;
         SetConsoleMode(hout, new_out);
     }
+
+    // Ask the host terminal to report pointer events: without these DEC modes
+    // a VT host (VS Code / Windows Terminal) never sends mouse, so only the
+    // physical-console path (real conhost window clicks) would generate
+    // MOUSE_EVENT_RECORDs. With VT processing on, these are interpreted by
+    // the terminal and ConPTY relays the reports back as INPUT_RECORDs.
+    write_mouse_mode(true);
 }
 
 pub fn disable_raw_mode() {
+    // Tell the host to stop reporting pointers before restoring the console
+    // (after the restore the VT escapes would be printed literally).
+    write_mouse_mode(false);
     unsafe {
         let hin  = GetStdHandle(STD_INPUT_HANDLE);
         let hout = GetStdHandle(STD_OUTPUT_HANDLE);
         SetConsoleMode(hin,  ORIG_IN_MODE);
         SetConsoleMode(hout, ORIG_OUT_MODE);
     }
+}
+
+/// Enable (`true`) / disable (`false`) DEC mouse tracking on stdout: X10
+/// clicks (1000), press+drag (1002), any-motion hover (1003) and SGR (1006) so
+/// coordinates stay exact. Ignored by hosts without mouse-reporting support.
+fn write_mouse_mode(enable: bool) {
+    use std::io::Write;
+    let out = std::io::stdout();
+    let mut out = out.lock();
+    for code in [1000u16, 1002, 1003, 1006] {
+        let seq = if enable {
+            format!("\x1b[?{code}h")
+        } else {
+            format!("\x1b[?{code}l")
+        };
+        let _ = out.write_all(seq.as_bytes());
+    }
+    let _ = out.flush();
 }
 
 pub fn size() -> (u16, u16) {
@@ -128,8 +250,8 @@ pub fn size() -> (u16, u16) {
     }
 }
 
-/// Drain non-KEY_DOWN events from the queue. Returns true if a KEY_DOWN
-/// remains available.
+/// Drain irrelevant events from the queue. Returns true when a KEY_DOWN or a
+/// MOUSE_EVENT remains available for `read_key`.
 fn drain_non_key(hin: Handle) -> bool {
     unsafe {
         loop {
@@ -142,9 +264,11 @@ fn drain_non_key(hin: Handle) -> bool {
             PeekConsoleInputW(hin, &mut rec, 1, &mut peeked);
             if peeked == 0 { return false; }
 
-            if is_key_down(&rec) { return true; }
+            if is_key_down(&rec) || is_mouse(&rec) {
+                return true;
+            }
 
-            // Discard useless event (key up, mouse, focus, etc.)
+            // Discard useless event (key up, focus, resize, etc.)
             let mut read = 0u32;
             ReadConsoleInputW(hin, &mut rec, 1, &mut read);
         }
@@ -179,7 +303,12 @@ pub fn read_key() -> Key {
             let mut rec = std::mem::zeroed::<InputRecord>();
             let mut read = 0u32;
             ReadConsoleInputW(hin, &mut rec, 1, &mut read);
-            if read == 0 || !is_key_down(&rec) { continue; }
+            if read == 0 { continue; }
+
+            if is_mouse(&rec) {
+                return decode_mouse(&rec);
+            }
+            if !is_key_down(&rec) { continue; }
 
             let vk   = ke_vk(&rec.event);
             let ch   = ke_char(&rec.event);
@@ -212,6 +341,7 @@ pub fn read_key() -> Key {
             if ctrl && vk == 0x58 { return Key::CtrlX; }
             if ctrl && vk == 0x5A { return Key::CtrlZ; }
             if ctrl && vk == 0x54 { return Key::CtrlT; }
+            if ctrl && vk == 0x4D { return Key::CtrlM; }
             if alt && vk == 0x48 { return Key::AltH; }
             if alt && vk == 0x52 { return Key::AltR; }
             if alt && vk == 0x56 { return Key::AltV; }
@@ -322,5 +452,60 @@ pub fn clipboard_get() -> Option<String> {
             v.pop();
         }
         Some(String::from_utf16_lossy(&v))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::os::{MouseAction, MouseButton};
+
+    fn mouse_record(x: i16, y: i16, button: u32, ctrl: u32, flags: u32) -> InputRecord {
+        let mut event = [0u8; 16];
+        event[0..2].copy_from_slice(&x.to_ne_bytes());
+        event[2..4].copy_from_slice(&y.to_ne_bytes());
+        event[4..8].copy_from_slice(&button.to_ne_bytes());
+        event[8..12].copy_from_slice(&ctrl.to_ne_bytes());
+        event[12..16].copy_from_slice(&flags.to_ne_bytes());
+        InputRecord { event_type: MOUSE_EVENT_TYPE, _pad: 0, event }
+    }
+
+    #[test]
+    fn decode_mouse_left_press() {
+        let rec = mouse_record(5, 3, FROM_LEFT_1ST_BUTTON_PRESSED, 0, 0);
+        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!("expected mouse") };
+        assert_eq!(ev.x, 6); // 1-based
+        assert_eq!(ev.y, 4);
+        assert_eq!(ev.kind, MouseAction::Press);
+        assert_eq!(ev.button, MouseButton::Left);
+    }
+
+    #[test]
+    fn decode_mouse_release_and_wheel() {
+        // Move with no button -> release-like Move event.
+        let rec = mouse_record(2, 2, 0, 0, MOUSE_MOVED);
+        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        assert_eq!(ev.kind, MouseAction::Move);
+
+        // Wheel up: MOUSE_WHEELED with a positive signed delta in the high word.
+        let rec = mouse_record(2, 2, 1 << 16, 0, MOUSE_WHEELED);
+        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        assert_eq!(ev.kind, MouseAction::Press);
+        assert_eq!(ev.button, MouseButton::WheelUp);
+
+        // No button, no flags (a button just released).
+        let rec = mouse_record(2, 2, 0, 0, 0);
+        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        assert_eq!(ev.kind, MouseAction::Release);
+    }
+
+    #[test]
+    fn decode_mouse_ignores_key_records() {
+        let mut event = [0u8; 16];
+        event[0..4].copy_from_slice(&1i32.to_ne_bytes()); // key down
+        event[10..12].copy_from_slice(&('a' as u16).to_ne_bytes());
+        let rec = InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event };
+        assert!(!is_mouse(&rec));
+        assert!(is_key_down(&rec));
     }
 }

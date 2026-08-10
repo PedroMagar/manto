@@ -5,9 +5,12 @@
 
 mod app;
 mod cmd;
+mod config;
 mod input;
+mod json;
 mod menu;
 mod os;
+mod session;
 mod terminal_backend;
 mod terminal_emulator;
 mod ui;

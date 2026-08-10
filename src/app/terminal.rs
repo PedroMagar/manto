@@ -129,6 +129,54 @@ pub fn key_to_bytes(key: Key) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Keys whose terminal meaning is an ESC-based control sequence.
+///
+/// In a session with no real pseudo terminal (the piped fallback) there is no
+/// terminal to interpret them: mirroring them into the emulator would move the
+/// emulated cursor around the grid, and buffering them would leak raw control
+/// bytes into the child's stdin when the line is sent on Enter. They are
+/// ignored there (navigation over a pipe is meaningless anyway).
+pub fn is_terminal_navigation(key: Key) -> bool {
+    matches!(
+        key,
+        Key::Up | Key::Down | Key::Left | Key::Right
+            | Key::ShiftUp | Key::ShiftDown | Key::ShiftLeft | Key::ShiftRight
+            | Key::AltUp | Key::AltDown | Key::AltLeft | Key::AltRight
+            | Key::Home | Key::End | Key::PageUp | Key::PageDown
+            | Key::Delete | Key::CtrlDelete
+    )
+}
+
+/// Encode a pointer event as an SGR mouse report for a terminal app.
+/// Coordinates are 1-based (as reported), so they pass straight through.
+pub fn mouse_to_bytes(ev: crate::os::MouseEvent) -> Option<Vec<u8>> {
+    use crate::os::{MouseAction, MouseButton};
+    let base = match ev.button {
+        MouseButton::Left => 0u16,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::WheelUp => 64,
+        MouseButton::WheelDown => 65,
+    };
+    let mut code = base;
+    if ev.shift {
+        code |= 0x4;
+    }
+    if ev.alt {
+        code |= 0x8;
+    }
+    if ev.ctrl {
+        code |= 0x10;
+    }
+    let motion = matches!(ev.kind, MouseAction::Move | MouseAction::Drag);
+    let press = matches!(ev.kind, MouseAction::Press | MouseAction::Drag | MouseAction::Move);
+    if motion {
+        code |= 0x40;
+    }
+    let fin = if press { 'M' } else { 'm' };
+    Some(format!("\x1b[<{};{};{}{}", code, ev.x, ev.y, fin).into_bytes())
+}
+
 pub struct TerminalState {
     /// Persistent shell session for this terminal window.
     /// When Some, raw keyboard input is forwarded to the shell.
@@ -161,6 +209,13 @@ pub struct TerminalState {
     pipe_line: Vec<u8>,
     /// Partial line buffer (bytes not yet terminated by '\n').
     tail: String,
+    /// Local command history for piped (non-PTY) interactive sessions, which
+    /// have no terminal of their own to keep a history.
+    pipe_history: Vec<String>,
+    /// Index into `pipe_history` while recalling with Up/Down.
+    pipe_hist_idx: Option<usize>,
+    /// The line being edited before history navigation started.
+    pipe_draft: Option<String>,
 }
 
 impl TerminalState {
@@ -208,18 +263,99 @@ impl TerminalState {
     /// pipe; drop it instead of leaking a control byte into the child).
     pub fn pipe_cancel(&mut self) {
         self.pipe_line.clear();
+        self.reset_pipe_history();
     }
+
+    /// Forget any in-progress history navigation for the piped line.
+    pub fn reset_pipe_history(&mut self) {
+        self.pipe_hist_idx = None;
+        self.pipe_draft = None;
+    }
+
 
     /// Send the buffered line to the piped session. A blank line is flushed
     /// as a bare newline, like pressing Enter at an empty prompt.
+    ///
+    /// Bare REPL commands (`python`, `python2`, `python3`) are rewritten to
+    /// their `-i` interactive form before being sent: with no real terminal
+    /// the child would otherwise treat piped stdin as a script and just sit
+    /// waiting for EOF, making the session look dead. The sent line is also
+    /// remembered so Up/Down can recall it (there is no console history).
     pub fn pipe_flush(&mut self) {
         let mut line = Vec::new();
         std::mem::swap(&mut line, &mut self.pipe_line);
-        line.extend_from_slice(b"\r\n");
+        let text = String::from_utf8_lossy(&line).into_owned();
+        let trimmed = text.trim().to_string();
+
+        if !trimmed.is_empty()
+            && self.pipe_history.last().map(|l| l != &trimmed).unwrap_or(true)
+        {
+            self.pipe_history.push(trimmed.clone());
+            if self.pipe_history.len() > 100 {
+                self.pipe_history.remove(0);
+            }
+        }
+        self.pipe_hist_idx = None;
+        self.pipe_draft = None;
+
+        let sent = interactive_command(&trimmed);
+        let mut out = sent.into_bytes();
+        out.extend_from_slice(b"\r\n");
         if let Some(ref mut session) = self.shell_session {
-            session.write(&line);
+            session.write(&out);
         }
     }
+
+    /// Clear the current piped line in the emulator and draw `text` in its
+    /// place, updating the local line buffer to match.
+    fn set_pipe_line(&mut self, text: &str) {
+        self.pipe_line = text.as_bytes().to_vec();
+        if let Some(em) = self.emulator.as_mut() {
+            em.process(b"\r\x1b[2K");
+            em.process(text.as_bytes());
+        }
+    }
+
+    /// Recall previous piped lines with the Up (true) / Down (false) arrows,
+    /// replacing the current local line (and its display). Returns whether the
+    /// line changed. Only meaningful for piped sessions with a history.
+    pub fn pipe_recall(&mut self, up: bool) -> bool {
+        if self.pipe_history.is_empty() {
+            return false;
+        }
+        let len = self.pipe_history.len();
+        if self.pipe_hist_idx.is_none() {
+            if !up {
+                return false;
+            }
+            self.pipe_draft = Some(String::from_utf8_lossy(&self.pipe_line).into_owned());
+            self.pipe_hist_idx = Some(len - 1);
+            let line = self.pipe_history[len - 1].clone();
+            self.set_pipe_line(&line);
+            return true;
+        }
+        let idx = self.pipe_hist_idx.unwrap();
+        if up {
+            if idx == 0 {
+                return false;
+            }
+            self.pipe_hist_idx = Some(idx - 1);
+            let line = self.pipe_history[idx - 1].clone();
+            self.set_pipe_line(&line);
+            true
+        } else if idx + 1 < len {
+            self.pipe_hist_idx = Some(idx + 1);
+            let line = self.pipe_history[idx + 1].clone();
+            self.set_pipe_line(&line);
+            true
+        } else {
+            self.pipe_hist_idx = None;
+            let draft = self.pipe_draft.take().unwrap_or_default();
+            self.set_pipe_line(&draft);
+            true
+        }
+    }
+
 
     pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
         Self {
@@ -237,6 +373,9 @@ impl TerminalState {
             repl_prompt: None,
             pipe_line: Vec::new(),
             tail: String::new(),
+            pipe_history: Vec::new(),
+            pipe_hist_idx: None,
+            pipe_draft: None,
         }
     }
 
@@ -264,6 +403,9 @@ impl TerminalState {
             repl_prompt: None,
             pipe_line: Vec::new(),
             tail: String::new(),
+            pipe_history: Vec::new(),
+            pipe_hist_idx: None,
+            pipe_draft: None,
         })
     }
 
@@ -288,6 +430,9 @@ impl TerminalState {
             repl_prompt: None,
             pipe_line: Vec::new(),
             tail: String::new(),
+            pipe_history: Vec::new(),
+            pipe_hist_idx: None,
+            pipe_draft: None,
         })
     }
 
@@ -485,6 +630,43 @@ mod tests {
         // Desktop shortcuts carry no terminal meaning.
         assert!(key_to_bytes(Key::Ctrl1).is_none());
         assert!(key_to_bytes(Key::AltR).is_none());
+    }
+
+    #[test]
+    fn terminal_navigation_keys_are_detected() {
+        use crate::os::Key;
+        for key in [
+            Key::Up, Key::Down, Key::Left, Key::Right,
+            Key::ShiftUp, Key::AltLeft, Key::Home, Key::End,
+            Key::PageUp, Key::PageDown, Key::Delete, Key::CtrlDelete,
+        ] {
+            assert!(is_terminal_navigation(key), "{key:?} is navigation");
+        }
+        for key in [Key::Char('a'), Key::Enter, Key::Backspace, Key::Tab, Key::CtrlC, Key::Char(' ')] {
+            assert!(!is_terminal_navigation(key), "{key:?} is not navigation");
+        }
+    }
+
+    #[test]
+    fn mouse_to_bytes_builds_sgr_reports() {
+        use crate::os::{MouseAction, MouseButton, MouseEvent};
+        let press = MouseEvent {
+            x: 12, y: 7,
+            kind: MouseAction::Press,
+            button: MouseButton::Left,
+            shift: false, ctrl: false, alt: false,
+        };
+        assert_eq!(mouse_to_bytes(press), Some(b"\x1b[<0;12;7M".to_vec()));
+
+        let drag = MouseEvent { x: 3, y: 4, kind: MouseAction::Drag, button: MouseButton::Left, shift: true, ctrl: true, alt: false, ..press };
+        // 0 (left) | drag 0x40 | shift 0x4 | ctrl 0x10 = 0x54 = 84.
+        assert_eq!(mouse_to_bytes(drag), Some(b"\x1b[<84;3;4M".to_vec()));
+
+        let release = MouseEvent { x: 1, y: 1, kind: MouseAction::Release, button: MouseButton::Left, shift: false, ctrl: false, alt: false, ..press };
+        assert_eq!(mouse_to_bytes(release), Some(b"\x1b[<0;1;1m".to_vec()));
+
+        let wheel = MouseEvent { x: 5, y: 5, kind: MouseAction::Press, button: MouseButton::WheelUp, shift: false, ctrl: false, alt: false, ..press };
+        assert_eq!(mouse_to_bytes(wheel), Some(b"\x1b[<64;5;5M".to_vec()));
     }
 
     #[test]
@@ -774,7 +956,7 @@ mod tests {
         }
     }
 
-    #[test]
+#[test]
     fn pipe_line_buffer_edits_correctly() {
         let mut ts = TerminalState::new(".".to_string(), Vec::new());
         ts.pipe_feed(b"X=3");
@@ -791,6 +973,45 @@ mod tests {
         assert_eq!(ts.pipe_line.len(), 4);
         ts.pipe_backspace();
         assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "ç");
+    }
+
+    #[test]
+    fn pipe_recall_navigates_local_history() {
+        let mut ts = TerminalState::new(".".to_string(), Vec::new());
+        ts.pipe_feed(b"echo um");
+        ts.pipe_flush();
+        ts.pipe_feed(b"echo dois");
+        ts.pipe_flush();
+        ts.pipe_feed(b"newnline");
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "newnline");
+
+        // Up recalls newest, then older.
+        assert!(ts.pipe_recall(true));
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "echo dois");
+        assert!(ts.pipe_recall(true));
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "echo um");
+        assert!(!ts.pipe_recall(true), "already at the oldest entry");
+
+        // Down walks back and finally restores the draft.
+        assert!(ts.pipe_recall(false));
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "echo dois");
+        assert!(ts.pipe_recall(false));
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "newnline");
+
+        // Empty history does nothing.
+        let mut empty = TerminalState::new(".".to_string(), Vec::new());
+        assert!(!empty.pipe_recall(true));
+    }
+
+    #[test]
+    fn pipe_flush_replaces_bare_python_with_interactive() {
+        // A bare REPL command sent through the pipe must become its `-i` form
+        // (no terminal means a bare `python` would otherwise read stdin as a
+        // script and hang waiting for EOF).
+        assert_eq!(interactive_command("python3"), "python3 -i");
+        assert_eq!(interactive_command("python"), "python -i");
+        assert_eq!(interactive_command("dir"), "dir");
+        assert_eq!(interactive_command("python3 script.py"), "python3 script.py");
     }
 
     #[test]
@@ -949,3 +1170,4 @@ mod tests {
         assert!(seen, "typed input never became visible in the emulator");
     }
 }
+

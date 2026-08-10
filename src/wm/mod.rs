@@ -278,16 +278,22 @@ pub fn sync_terminal_window_metrics(applications: &mut [Application]) {
     }
 }
 
-/// Return the index of the visually topmost window at (x, y).
+/// Return the index of the visually topmost window at (x, y), honoring the
+/// `layer` field (higher layer wins; equal layers keep vector order).
 pub fn topmost_window_at(applications: &[Application], current_desktop: usize, x: u16, y: u16) -> Option<usize> {
-    applications.iter().rposition(|app| {
-        app.on_desktop(current_desktop) && app.window().map_or(false, |win| {
-            x >= win.position_x
-                && x < win.position_x + win.width
-                && y >= win.position_y
-                && y < win.position_y + win.height
+    applications
+        .iter()
+        .enumerate()
+        .filter(|(_, app)| {
+            app.on_desktop(current_desktop) && app.window().map_or(false, |win| {
+                x >= win.position_x
+                    && x < win.position_x + win.width
+                    && y >= win.position_y
+                    && y < win.position_y + win.height
+            })
         })
-    })
+        .max_by_key(|(idx, app)| (app.window().map_or(0, |w| w.layer), *idx))
+        .map(|(idx, _)| idx)
 }
 
 /// Compute (app_idx, tab_y, tab_height) for each visible minimized app.
@@ -332,7 +338,8 @@ pub fn active_window_idx(applications: &[Application], mode: &Mode, current_desk
             .and_then(|app| app.window())
             .map(|_| *app_idx),
         Mode::Normal => applications.iter().enumerate()
-            .rfind(|(_, app)| app.on_desktop(current_desktop) && app.window().is_some())
+            .filter(|(_, app)| app.on_desktop(current_desktop) && app.window().is_some())
+            .max_by_key(|(idx, app)| (app.window().map_or(0, |w| w.layer), *idx))
             .map(|(idx, _)| idx),
         Mode::Typing => None,
     }
@@ -357,8 +364,28 @@ pub fn close_active_window(applications: &mut Vec<Application>, mode: &mut Mode,
     true
 }
 
+/// Highest layer currently assigned to any window (0 when none).
+fn max_layer(applications: &[Application]) -> u16 {
+    applications
+        .iter()
+        .filter_map(|a| a.window().map(|w| w.layer))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Raise the window to the top of the real z-order (bump `layer` above
+/// everything else) and move it to the end of the backing vector.
 pub fn bring_window_to_front(applications: &mut Vec<Application>, idx: usize) -> usize {
-    if idx >= applications.len() || idx == applications.len() - 1 {
+    if idx >= applications.len() {
+        return idx;
+    }
+    let new_layer = max_layer(applications).saturating_add(1);
+    if let Some(app) = applications.get_mut(idx) {
+        if let Some(win) = app.window_mut() {
+            win.layer = new_layer;
+        }
+    }
+    if idx == applications.len() - 1 {
         idx
     } else {
         let app = applications.remove(idx);
@@ -386,6 +413,7 @@ pub fn spawn_terminal_window(
     let ty = 1 + usable_h.saturating_sub(th) / 2;
     let win = Window::new(tx, ty, tw, th, 0);
     applications.push(Application::terminal_window(title, win, path.to_string(), commands).with_desktop(current_desktop));
+    bring_window_to_front(applications, applications.len() - 1);
     applications.len() - 1
 }
 
@@ -416,6 +444,7 @@ pub fn spawn_interactive_terminal(
         Application::interactive_terminal_window(title, win, path.to_string(), program)
             .with_desktop(current_desktop),
     );
+    bring_window_to_front(applications, applications.len() - 1);
     applications.len() - 1
 }
 
@@ -438,6 +467,7 @@ pub fn spawn_terminal_window_at(
         Application::terminal_window(title, win, path.to_string(), commands)
             .with_desktop(current_desktop),
     );
+    bring_window_to_front(applications, applications.len() - 1);
     applications.len() - 1
 }
 
@@ -535,6 +565,7 @@ pub fn toggle_start_menu(
             Window::new(2, pos_y, win_w, win_h, 0).without_chrome(),
             items,
         ).with_desktop(current_desktop));
+        bring_window_to_front(applications, applications.len() - 1);
     }
     *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));
     true
@@ -922,6 +953,42 @@ mod tests {
         let win = applications[0].window().unwrap();
         assert!(window_matches_geometry(win, top.0, top.1, top.2, top.3));
         assert!(!applications[0].is_maximized());
+    }
+
+    #[test]
+    fn topmost_window_at_honors_layer() {
+        // Two overlapping windows: B has a higher layer, so it wins even
+        // though o elencado (vector) order would put A last.
+        let mut applications = vec![
+            Application::windowed("A", Window::new(10, 5, 20, 8, 0)),
+            Application::windowed("B", Window::new(10, 5, 20, 8, 0)),
+        ];
+        applications[1].window_mut().unwrap().layer = 3;
+        applications[0].window_mut().unwrap().layer = 1;
+
+        assert_eq!(topmost_window_at(&applications, 1, 15, 7), Some(1));
+
+        // Raising A bumps it above B and moves it to the vector front.
+        let idx = bring_window_to_front(&mut applications, 0);
+        assert_eq!(
+            applications[idx].window().unwrap().layer,
+            4,
+            "raise must bump the window's layer"
+        );
+        assert_eq!(topmost_window_at(&applications, 1, 15, 7), Some(idx));
+    }
+
+    #[test]
+    fn active_window_favours_maximum_layer() {
+        let mut applications = vec![
+            Application::windowed("A", Window::new(2, 2, 20, 8, 0)),
+            Application::windowed("B", Window::new(5, 5, 20, 8, 0)),
+            Application::windowed("C", Window::new(10, 10, 30, 10, 0)),
+        ];
+        // Give the last (vector) window a lower layer than B.
+        applications[1].window_mut().unwrap().layer = 5;
+        applications[2].window_mut().unwrap().layer = 1;
+        assert_eq!(active_window_idx(&applications, &Mode::Normal, 1), Some(1));
     }
 
     #[test]
