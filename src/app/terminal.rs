@@ -56,17 +56,17 @@ pub fn split_interactive_flag(raw: &str) -> (String, bool) {
 pub fn default_shell() -> String {
     #[cfg(not(windows))]
     {
-        "/bin/sh".to_string()
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     }
     #[cfg(windows)]
     {
-        if std::path::Path::new("pwsh.exe").exists() {
-            "pwsh.exe".to_string()
-        } else if std::path::Path::new("powershell.exe").exists() {
-            "powershell.exe".to_string()
-        } else {
-            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+        // Prefer a real pwsh/powershell found on PATH, then COMSPEC.
+        for name in ["pwsh.exe", "powershell.exe"] {
+            if let Some(path) = crate::os::find_on_path(name) {
+                return path;
+            }
         }
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
     }
 }
 
@@ -81,7 +81,15 @@ pub fn key_to_bytes(key: Key) -> Option<Vec<u8>> {
         }
         Key::Enter | Key::CtrlEnter => buf.push(b'\r'),
         Key::Tab => buf.push(b'\t'),
-        Key::Backspace => buf.push(0x7f),
+        Key::Backspace => {
+            // Windows consoles translate 0x7F into a Delete key event, which
+            // console readers (python's REPL, cmd) ignore; 0x08 is VK_BACK
+            // and also reads as backspace in readline/vim-style apps.
+            #[cfg(windows)]
+            buf.push(0x08);
+            #[cfg(not(windows))]
+            buf.push(0x7f);
+        }
         Key::Escape => buf.push(0x1b),
         Key::Delete => buf.extend_from_slice(b"\x1b[3~"),
         Key::PageUp => buf.extend_from_slice(b"\x1b[5~"),
@@ -146,16 +154,71 @@ pub struct TerminalState {
     /// ">>>"). When Some, the window hides the " .> " bar and uses this
     /// prompt instead.
     pub repl_prompt:  Option<String>,
+    /// Partial typed line for piped (non-PTY) sessions. There is no console
+    /// to do the editing, so keystrokes buffer here and the complete line is
+    /// sent on Enter — backspace truly removes a character instead of
+    /// leaking a literal 0x08 into the child's input.
+    pipe_line: Vec<u8>,
     /// Partial line buffer (bytes not yet terminated by '\n').
     tail: String,
 }
 
 impl TerminalState {
+    /// Mirror typed input into the emulator grid. Used by the interactive
+    /// passthrough when the session has no real PTY (piped fallback): the
+    /// shell will not echo, so Manto renders the keystrokes itself. For
+    /// Backspace the erased cell is blanked locally ("\x08 \x08"), matching
+    /// what a console would do with its own echo.
+    pub fn mirror_input(&mut self, bytes: &[u8], backspace: bool) {
+        let Some(em) = self.emulator.as_mut() else {
+            return;
+        };
+        if backspace {
+            em.process(b"\x08 \x08");
+        } else {
+            em.process(bytes);
+        }
+    }
+
     /// Detect a REPL prompt in the output stream (e.g. Python's ">>>",
     /// "sqlite>") so it is not displayed as a loose line.
     fn looks_like_repl_prompt(line: &str) -> bool {
         let t = line.trim();
         !t.is_empty() && t.chars().count() <= 12 && t.ends_with('>')
+    }
+
+    /// Buffer typed bytes for a piped (non-PTY) session: characters are
+    /// collected until Enter, when the whole corrected line is sent.
+    pub fn pipe_feed(&mut self, bytes: &[u8]) {
+        self.pipe_line.extend_from_slice(bytes);
+    }
+
+    /// Remove the last typed character from the piped line buffer (a full
+    /// UTF-8 character, continuation bytes included).
+    pub fn pipe_backspace(&mut self) {
+        while let Some(&b) = self.pipe_line.last() {
+            self.pipe_line.pop();
+            if b & 0xC0 != 0x80 {
+                break;
+            }
+        }
+    }
+
+    /// Abandon the partial piped line (Ctrl+C has no interrupt meaning on a
+    /// pipe; drop it instead of leaking a control byte into the child).
+    pub fn pipe_cancel(&mut self) {
+        self.pipe_line.clear();
+    }
+
+    /// Send the buffered line to the piped session. A blank line is flushed
+    /// as a bare newline, like pressing Enter at an empty prompt.
+    pub fn pipe_flush(&mut self) {
+        let mut line = Vec::new();
+        std::mem::swap(&mut line, &mut self.pipe_line);
+        line.extend_from_slice(b"\r\n");
+        if let Some(ref mut session) = self.shell_session {
+            session.write(&line);
+        }
     }
 
     pub fn new(path: String, commands: Vec<CommandEntry>) -> Self {
@@ -172,6 +235,7 @@ impl TerminalState {
             history_index: None,
             history_draft: None,
             repl_prompt: None,
+            pipe_line: Vec::new(),
             tail: String::new(),
         }
     }
@@ -198,14 +262,16 @@ impl TerminalState {
             history_index: None,
             history_draft: None,
             repl_prompt: None,
+            pipe_line: Vec::new(),
             tail: String::new(),
         })
     }
 
     /// Interactive terminal: run `program` directly (emulator renders output,
-    /// keys forwarded raw).
+    /// keys forwarded raw). Bare `python`/`python2`/`python3` gain `-i` so a
+    /// piped fallback still behaves as a REPL.
     pub fn with_program(path: String, program: &str) -> Result<Self, String> {
-        let mut session = CommandSession::spawn(program, &path)?;
+        let mut session = CommandSession::spawn_app(&interactive_command(program), &path)?;
         session.resize(80, 24);
         Ok(Self {
             shell_session: Some(session),
@@ -220,6 +286,7 @@ impl TerminalState {
             history_index: None,
             history_draft: None,
             repl_prompt: None,
+            pipe_line: Vec::new(),
             tail: String::new(),
         })
     }
@@ -235,6 +302,33 @@ impl TerminalState {
             lines.extend(entry.output_lines.iter().cloned());
         }
         lines
+    }
+
+    /// Send a typed line to the session, exactly like the desktop's `.>`
+    /// bar: REPL commands get rewritten (`python` -> `python -i`), the line
+    /// is forwarded, and — when the session is not a real PTY (piped
+    /// fallback) — Manto mirrors the typed text into the view so commands
+    /// stay visible even though no console echoes them. Real PTYs echo
+    /// themselves, so nothing is doubled.
+    pub fn run_line(&mut self, cmd: &str) {
+        let real_pty = self.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(true);
+        if let Some(ref mut session) = self.shell_session {
+            let line = format!("{}\r\n", interactive_command(cmd));
+            session.write(line.as_bytes());
+        }
+        if !real_pty && !cmd.trim().is_empty() {
+            self.push_shell_line(cmd.trim().to_string());
+        }
+        if !cmd.trim().is_empty() {
+            self.commands.push(CommandEntry::completed(cmd, &self.path, Vec::new()));
+            const MAX_HISTORY: usize = 200;
+            if self.commands.len() > MAX_HISTORY {
+                self.commands.drain(..self.commands.len() - MAX_HISTORY);
+            }
+        }
+        if self.repl_prompt.is_some() && is_repl_exit(cmd) {
+            self.clear_repl();
+        }
     }
 
     /// Advance one tick: drain session output, feed the emulator (interactive)
@@ -384,6 +478,10 @@ mod tests {
         assert_eq!(key_to_bytes(Key::CtrlC).unwrap(), b"\x03");
         assert_eq!(key_to_bytes(Key::CtrlZ).unwrap(), b"\x1a");
         assert_eq!(key_to_bytes(Key::Char('a')).unwrap(), b"a");
+        // Backspace: VK_BACK (0x08) on Windows so console REPLs erase;
+        // DEL (0x7f) on Unix, the terminal standard.
+        let bs = key_to_bytes(Key::Backspace).unwrap();
+        assert_eq!(bs, if cfg!(windows) { vec![0x08] } else { vec![0x7f] }, "backspace byte per platform");
         // Desktop shortcuts carry no terminal meaning.
         assert!(key_to_bytes(Key::Ctrl1).is_none());
         assert!(key_to_bytes(Key::AltR).is_none());
@@ -621,6 +719,161 @@ mod tests {
     }
 
     #[test]
+    fn line_mode_repl_keeps_typed_commands_visible() {
+        // Regression: after starting a REPL in a line-mode terminal, commands
+        // typed at the `.>` bar must remain visible next to their results —
+        // via the console echo on a real PTY, or via Manto's local mirror on
+        // the piped fallback. The python banner wait is tolerant: on hosts
+        // where the app-aliased python3 boot is slow, the core assertion
+        // (typed command visible) still holds via the local mirror.
+        use super::super::Application;
+        use crate::ui::window::Window;
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let mut app = Application::terminal_window("Term", Window::new(4, 4, 60, 25, 0), cwd, Vec::new());
+        {
+            let t = app.terminal.as_mut().unwrap();
+            assert!(t.has_session(), "line-mode terminal must own a session");
+            t.run_line("python");
+        }
+
+        // Wait (tolerantly) for the REPL banner before sending the payload.
+        let start = Instant::now();
+        let mut banner = false;
+        while start.elapsed() < Duration::from_secs(10) {
+            let t = app.terminal.as_mut().unwrap();
+            t.tick();
+            if t.shell_lines.iter().any(|l| l.contains("Python")) {
+                banner = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+
+        {
+            let t = app.terminal.as_mut().unwrap();
+            t.run_line("x=41");
+            t.run_line("print(x+1)");
+        }
+
+        let start = Instant::now();
+        let mut joined = String::new();
+        while start.elapsed() < Duration::from_secs(10) {
+            let t = app.terminal.as_mut().unwrap();
+            t.tick();
+            joined = t.shell_lines.join("\n");
+            if joined.contains("x=41") && (!banner || joined.contains("42")) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(joined.contains("x=41"), "typed command lost: {joined:?}");
+        if banner {
+            assert!(joined.contains("42"), "repl result lost: {joined:?}");
+        }
+    }
+
+    #[test]
+    fn pipe_line_buffer_edits_correctly() {
+        let mut ts = TerminalState::new(".".to_string(), Vec::new());
+        ts.pipe_feed(b"X=3");
+        ts.pipe_backspace(); // erases the "3"
+        ts.pipe_feed(b"4");
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "X=4");
+        ts.pipe_backspace();
+        ts.pipe_backspace(); // pops "4", then "="
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "X");
+        ts.pipe_flush(); // no session: nothing to send, buffer empties
+        assert!(ts.pipe_line.is_empty());
+        // Backspace removes a full UTF-8 character, not a single byte.
+        ts.pipe_feed("çã".as_bytes());
+        assert_eq!(ts.pipe_line.len(), 4);
+        ts.pipe_backspace();
+        assert_eq!(String::from_utf8_lossy(&ts.pipe_line), "ç");
+    }
+
+    #[test]
+    fn piped_session_gets_the_corrected_line() {
+        // User flow: type "X=4", backspace, type "2", Enter. The child's raw
+        // input must be "X=2" — a leaked 0x08 (the old bug produced "invalid
+        // non-printable character U+0008") is detected on the wire.
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let mut ts = TerminalState::with_program(cwd, "cmd.exe").unwrap();
+
+        let type_byte = |ts: &mut TerminalState, bytes: &[u8], backspace: bool| {
+            ts.mirror_input(bytes, backspace);
+            if backspace {
+                ts.pipe_backspace();
+            } else {
+                ts.pipe_feed(bytes);
+            }
+        };
+        type_byte(&mut ts, b"X=4", false);
+        type_byte(&mut ts, &[0x08], true);
+        type_byte(&mut ts, b"2", false);
+        ts.mirror_input(b"\r\n", false);
+        ts.pipe_flush();
+        // A second line proves streaming continues after the edit.
+        type_byte(&mut ts, b"echo PIPE_SECOND_9911", false);
+        ts.mirror_input(b"\r\n", false);
+        ts.pipe_flush();
+
+        let start = Instant::now();
+        let mut saw_corrected = false;
+        let mut saw_second = false;
+        let mut no_leak = true;
+        while start.elapsed() < Duration::from_secs(8) {
+            let poll = ts.shell_session.as_mut().unwrap().poll();
+            for chunk in &poll.outputs {
+                if chunk.contains(&0x08) {
+                    no_leak = false;
+                }
+                let text = String::from_utf8_lossy(chunk);
+                // cmd echoes the executed line in its "not recognized" error.
+                if text.contains("X=2") {
+                    saw_corrected = true;
+                }
+                if text.contains("PIPE_SECOND_9911") {
+                    saw_second = true;
+                }
+            }
+            if saw_corrected && saw_second {
+                break;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+        assert!(saw_corrected, "child never received the corrected line");
+        assert!(saw_second, "input streaming broke after the backspace edit");
+        assert!(no_leak, "backspace byte leaked into the child input");
+    }
+
+    #[test]
+    fn interactive_backspace_mirror_erases_the_cell() {
+        // Regression: on piped sessions (no console echo) Manto renders the
+        // keystrokes itself; backspace must erase the cell, not just move
+        // the cursor back.
+        let mut ts = TerminalState::new(".".to_string(), Vec::new());
+        ts.emulator = Some(Terminal::new(20, 3));
+
+        ts.mirror_input(b"a", false);
+        ts.mirror_input(b"b", false);
+        ts.mirror_input(b"c", false);
+        let line = ts.emulator.as_ref().unwrap().line_as_text(0);
+        assert_eq!(line.trim_end(), "abc");
+
+        ts.mirror_input(&[0x08], true);
+        let line = ts.emulator.as_ref().unwrap().line_as_text(0);
+        assert_eq!(line.trim_end(), "ab", "backspace must blank the cell");
+
+        ts.mirror_input(&[0x08], true);
+        let line = ts.emulator.as_ref().unwrap().line_as_text(0);
+        assert_eq!(line.trim_end(), "a");
+    }
+
+    #[test]
     fn interactive_resize_is_propagated() {
         let mut t = TerminalState::new(".".to_string(), Vec::new());
         let mut em = Terminal::new(80, 24);
@@ -650,7 +903,7 @@ mod tests {
         let t = app.terminal.as_mut().unwrap();
         assert!(t.interactive && t.has_session() && t.emulator.is_some());
 
-        // Settle the initial prompt.
+// Settle the initial prompt.
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(5) {
             t.tick();
@@ -658,12 +911,25 @@ mod tests {
             thread::sleep(Duration::from_millis(30));
         }
 
-        // Type a unique string one key at a time (no Enter yet).
-        if let Some(ref mut s) = t.shell_session {
-            for b in b"manto_type_4711\x0d" {
+        // Type a unique string one key at a time through the same path the
+        // desktop uses (mirror + pipe buffer on piped sessions, raw bytes on
+        // real PTYs where the console echoes).
+        let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
+        for b in b"manto_type_4711" {
+            if !is_pty {
+                t.mirror_input(&[*b], false);
+                t.pipe_feed(&[*b]);
+            } else if let Some(ref mut s) = t.shell_session {
                 let _ = s.write(&[*b]);
-                thread::sleep(Duration::from_millis(20));
             }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if is_pty {
+            if let Some(ref mut s) = t.shell_session {
+                let _ = s.write(b"\r");
+            }
+        } else {
+            t.pipe_flush();
         }
 
         let start = Instant::now();

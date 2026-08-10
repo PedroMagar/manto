@@ -4,10 +4,11 @@
 use std::io::Write;
 use std::time::Duration;
 
-use super::terminal::{interactive_command, is_interactive_app, is_repl_exit, split_interactive_flag};
+use super::terminal::{default_shell, is_interactive_app, split_interactive_flag};
 use super::Application;
 use crate::cmd::{tick_all, CommandEntry};
 use crate::input::{self, History};
+use crate::menu::{self, MenuItem, MenuKind};
 use crate::os::{self, Clock, Key};
 use crate::ui::pointer::Pointer;
 use crate::ui::{compute_render_state, desktop_at, render, CMD_INPUT_X, STATUS_BAR_PREFIX,
@@ -266,6 +267,16 @@ impl Desktop {
             }
         }
 
+        // Start menu open on this desktop: Up/Down navigate the entries,
+        // Enter launches the selected one, Esc/Ctrl+D close. Other keys fall
+        // through to the normal handler.
+        if matches!(self.mode, Mode::Normal)
+            && let Some(menu_idx) = self.start_menu_idx()
+            && let Some(handled) = self.key_menu(menu_idx, &key)
+        {
+            return handled;
+        }
+
         let mut mode_changed = false;
 
         match key {
@@ -455,7 +466,8 @@ impl Desktop {
                 mode_changed = true;
             }
             Key::CtrlD => {
-                if toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll) {
+                if toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load()) {
+                    self.park_pointer_on_start_menu();
                     mode_changed = true;
                 }
             }
@@ -507,7 +519,8 @@ impl Desktop {
                         && self.pointer.x >= STATUS_START_X
                         && self.pointer.x < start_end
                     {
-                        toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll);
+                        toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load());
+                        self.park_pointer_on_start_menu();
                         mode_changed = true;
                     } else if self.pointer.x == sb_x {
                         self.last_space_time = None;
@@ -1124,14 +1137,20 @@ impl Desktop {
                 if let Some(text) = text {
                     if !text.is_empty() {
                         if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                            if let Some(ref mut s) = t.shell_session {
-                                let _ = s.write(text.as_bytes());
-                            }
+                            let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
                             if let Some(em) = t.emulator.as_mut() {
-                                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
                                 if !is_pty {
                                     em.process(text.as_bytes());
                                 }
+                            }
+                            if is_pty {
+                                if let Some(ref mut s) = t.shell_session {
+                                    let _ = s.write(text.as_bytes());
+                                }
+                            } else {
+                                // Piped sessions: buffer until Enter so the
+                                // pasted text joins the edited line.
+                                t.pipe_feed(text.as_bytes());
                             }
                         }
                     }
@@ -1145,21 +1164,33 @@ impl Desktop {
     /// Forward a key raw to the session, with Manto-side local echo when the
     /// backend has no real PTY.
     fn forward_interactive(&mut self, app_idx: usize, key: Key, enter: bool) -> bool {
+        let backspace = matches!(key, Key::Backspace);
+        let ctrl_c = matches!(key, Key::CtrlC);
         let bytes = crate::app::terminal::key_to_bytes(key);
         if let Some(bytes) = bytes {
             if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
                 let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
-                // Piped fallback has no real echo: mirror input into the emulator.
                 if !is_pty {
-                    if let Some(em) = t.emulator.as_mut() {
-                        if enter {
-                            em.process(b"\r\n");
-                        } else {
-                            em.process(&bytes);
-                        }
+                    // Piped fallback: no console to echo or edit. Manto mirrors
+                    // the keystrokes into the emulator and keeps the partial
+                    // line itself, sending the corrected line on Enter — a
+                    // literal backspace byte would otherwise land inside the
+                    // child's input as "U+0008".
+                    if enter {
+                        t.mirror_input(b"\r\n", false);
+                        t.pipe_flush();
+                    } else if backspace {
+                        t.mirror_input(&bytes, true);
+                        t.pipe_backspace();
+                    } else if ctrl_c {
+                        t.mirror_input(b"\r\n", false);
+                        t.pipe_cancel();
+                    } else {
+                        t.mirror_input(&bytes, false);
+                        t.pipe_feed(&bytes);
                     }
-                }
-                if let Some(ref mut s) = t.shell_session {
+                } else if let Some(ref mut s) = t.shell_session {
+                    // Real PTY: the child/console handles echo and editing.
                     let _ = s.write(&bytes);
                 }
             }
@@ -1177,18 +1208,7 @@ impl Desktop {
         let cmd = t.cmd_input.trim().to_string();
         if !cmd.is_empty() {
             if is_session {
-                if let Some(ref mut session) = t.shell_session {
-                    let line = format!("{}\r\n", interactive_command(&cmd));
-                    session.write(line.as_bytes());
-                }
-                t.commands.push(CommandEntry::completed(&cmd, &t.path, Vec::new()));
-                const MAX_HISTORY: usize = 200;
-                if t.commands.len() > MAX_HISTORY {
-                    t.commands.drain(..t.commands.len() - MAX_HISTORY);
-                }
-                if t.repl_prompt.is_some() && is_repl_exit(&cmd) {
-                    t.clear_repl();
-                }
+                t.run_line(&cmd);
             } else {
                 push_shell_command(&mut t.commands, &mut t.path, &cmd);
             }
@@ -1200,6 +1220,178 @@ impl Desktop {
         } else {
             false
         }
+    }
+
+    /// Index of the open start menu window on the current desktop.
+    fn start_menu_idx(&self) -> Option<usize> {
+        self.applications.iter().rposition(|app| {
+            app.on_desktop(self.current_desktop) && app.is_menu
+        })
+    }
+
+    /// Land the pointer on the first menu entry (the "▶" of the initial
+    /// selection) when the start menu opens.
+    fn park_pointer_on_start_menu(&mut self) {
+        if let Some(idx) = self.start_menu_idx()
+            && let Some(win) = self.applications[idx].window()
+        {
+            self.pointer.x = win.position_x + 1;
+            self.pointer.y = win.position_y + 1;
+            self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
+        }
+    }
+
+    /// Keyboard handling while the start menu is open (Normal mode only).
+    /// Returns None when the key is not a menu key and should fall through
+    /// to the normal handler.
+    fn key_menu(&mut self, menu_idx: usize, key: &Key) -> Option<bool> {
+        // Esc with a free screen selection active clears it first, exactly
+        // like normal mode.
+        if matches!(key, Key::Escape) && self.sel.is_some() {
+            self.sel = None;
+            self.sel_pos = None;
+            return Some(true);
+        }
+
+        // The pointer always moves with the arrows; while it is over the menu
+        // the highlighted entry is simply the one under the pointer.
+        match key {
+            Key::Up | Key::Down | Key::Left | Key::Right => {
+                match key {
+                    Key::Up => self.pointer.move_up(),
+                    Key::Down => self.pointer.move_down(self.last_size.1),
+                    Key::Left => self.pointer.move_left(),
+                    _ => self.pointer.move_right(self.last_size.0),
+                }
+                if let Some(selected) = self.menu_item_under_pointer(menu_idx) {
+                    self.select_menu_item(menu_idx, selected);
+                }
+                Some(true)
+            }
+            Key::Enter | Key::Char(' ') => {
+                // Pointer not over an entry: normal click (menu borders,
+                // other windows, the Start button itself).
+                self.menu_item_under_pointer(menu_idx)?;
+                let item = {
+                    let state = self.applications.get(menu_idx)?.menu.as_ref()?;
+                    state.items.get(state.selected).cloned()
+                };
+                let Some(item) = item else {
+                    return Some(false);
+                };
+                self.close_start_menu(menu_idx);
+                self.launch_menu_item(&item);
+                Some(true)
+            }
+            Key::Escape | Key::CtrlD => {
+                self.close_start_menu(menu_idx);
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    /// Index of the menu entry under the pointer, when the pointer is over an
+    /// entry row of the open start menu.
+    fn menu_item_under_pointer(&self, menu_idx: usize) -> Option<usize> {
+        let app = self.applications.get(menu_idx)?;
+        let win = app.window()?;
+        let state = app.menu.as_ref()?;
+        let (px, py) = (self.pointer.x, self.pointer.y);
+        if px < win.position_x + 1 || px >= win.position_x + win.width - 1 {
+            return None;
+        }
+        if py < win.position_y + 1 || py >= win.position_y + win.height - 1 {
+            return None;
+        }
+        let row = (py - win.position_y - 1) as usize;
+        let entry = state.scroll + row;
+        (entry < state.items.len()).then_some(entry)
+    }
+
+    /// Move the menu selection, keeping it inside the visible rows.
+    fn select_menu_item(&mut self, menu_idx: usize, selected: usize) {
+        let visible = self.applications.get(menu_idx)
+            .and_then(|app| app.window())
+            .map_or(1, |win| (win.height as usize).saturating_sub(2).max(1));
+        if let Some(state) = self.applications[menu_idx].menu.as_mut() {
+            state.selected = selected;
+            state.keep_selected_visible(visible);
+        }
+    }
+
+    /// Close the start menu window (it is re-created on the next toggle).
+    fn close_start_menu(&mut self, menu_idx: usize) {
+        self.applications.remove(menu_idx);
+        self.tab_scroll = self.tab_scroll
+            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+    }
+
+    /// Launch a manifest entry: interactive app, plain terminal, or a
+    /// terminal running one command, on the requested desktop (defaults to
+    /// the current one).
+    fn launch_menu_item(&mut self, item: &MenuItem) -> bool {
+        let cwd = item.resolve_cwd(&self.current_path);
+        let desktop = item.desktop.unwrap_or(self.current_desktop);
+        let command_line = item.command_line();
+
+        let app_idx = match item.kind {
+            MenuKind::App => {
+                let program = if command_line.is_empty() {
+                    default_shell()
+                } else {
+                    command_line.clone()
+                };
+                spawn_interactive_terminal(
+                    &mut self.applications,
+                    &mut self.next_terminal_id,
+                    desktop,
+                    self.last_size.0,
+                    self.last_size.1,
+                    &cwd,
+                    &program,
+                )
+            }
+            MenuKind::Terminal | MenuKind::Command => {
+                let idx = spawn_terminal_window(
+                    &mut self.applications,
+                    &mut self.next_terminal_id,
+                    desktop,
+                    self.last_size.0,
+                    self.last_size.1,
+                    &cwd,
+                    Vec::new(),
+                );
+                if item.kind == MenuKind::Command && !command_line.is_empty() {
+                    if let Some(t) = self.applications[idx].terminal.as_mut() {
+                        t.cmd_input = command_line;
+                        t.input_cursor = t.cmd_input.chars().count();
+                    }
+                    self.run_terminal_line(idx);
+                }
+                idx
+            }
+        };
+
+        if let Some(app) = self.applications.get_mut(app_idx) {
+            app.title = item.label.clone();
+        }
+
+        if desktop != self.current_desktop {
+            self.current_desktop = desktop;
+            self.tab_scroll = self.tab_scroll
+                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+        }
+
+        place_pointer_on_terminal_input(
+            &mut self.pointer,
+            &self.applications,
+            app_idx,
+            self.last_size.0,
+            self.last_size.1,
+        );
+        self.mode = Mode::TerminalFocus { app_idx };
+        true
     }
 }
 

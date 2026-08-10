@@ -229,15 +229,20 @@ pub fn draw_emulator_content(
     let ty = win.position_y;
     let inner_w = (win.width - 2) as usize;
     let inner_h = (win.height - 2) as usize;
-    let cols = (term.cols() as usize).min(inner_w);
-    let rows = (term.rows() as usize).min(inner_h);
-    if cols == 0 || rows == 0 { return; }
 
     let total = term.total_lines();
+    let rows = (term.rows() as usize).min(inner_h);
     let visible = rows;
     let max_scroll = total.saturating_sub(visible);
     let scroll = panel_scroll.min(max_scroll);
     let view_top_abs = total - visible - scroll;
+
+    // Reserve the last interior column for the vertical scrollbar when there
+    // is scrollback, mirroring the line-mode session view.
+    let has_sb = max_scroll > 0;
+    let view_w = inner_w.saturating_sub(if has_sb { 1 } else { 0 });
+    let cols = (term.cols() as usize).min(view_w);
+    if cols == 0 || rows == 0 { return; }
 
     for row in 0..visible {
         let abs = view_top_abs + row;
@@ -251,9 +256,9 @@ pub fn draw_emulator_content(
             prev_style = Some(cell.style);
             write!(out, "{}", cell.ch).unwrap();
         }
-        // Pad the rest of the window width with default style.
+        // Pad the rest of the view width with default style.
         ansi::sgr(out, prev_style.as_ref(), &Style::default());
-        for _ in cols..inner_w {
+        for _ in cols..view_w {
             write!(out, " ").unwrap();
         }
     }

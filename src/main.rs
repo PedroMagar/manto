@@ -6,6 +6,7 @@
 mod app;
 mod cmd;
 mod input;
+mod menu;
 mod os;
 mod terminal_backend;
 mod terminal_emulator;

@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "label": "Editor (vim)",
+      "kind": "app",
+      "command": "vim"
+    },
+    {
+      "label": "Python REPL",
+      "kind": "app",
+      "command": "python3"
+    },
+    {
+      "label": "Terminal no home",
+      "kind": "terminal",
+      "cwd": "~"
+    },
+    {
+      "label": "Terminal neste projeto",
+      "kind": "terminal",
+      "cwd": "D:\\Projetos\\manto"
+    },
+    {
+      "label": "Rodar testes",
+      "kind": "command",
+      "command": "cargo",
+      "args": ["test"]
+    },
+    {
+      "label": "Listar diretório (desktop 2)",
+      "kind": "command",
+      "command": "dir",
+      "desktop": 2
+    }
+  ]
+}

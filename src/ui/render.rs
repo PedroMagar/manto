@@ -7,10 +7,10 @@ use super::ansi;
 use super::pointer::Pointer;
 use super::screen::{BoxSelect, ScreenGrid, StampWriter};
 use super::window::{MIN_W, MIN_H};
-use super::{desktop_at, draw_command_panel, draw_desktop, draw_scrollbar, draw_status_bar,
-            draw_tab, draw_emulator_content, draw_shell_content, draw_terminal_content,
-            scrollbar_thumb, tab_char_at, CMD_INPUT_X, DESKTOP_AREA_LEN, STATUS_START,
-            STATUS_START_X, TERMINAL_INPUT_PREFIX};
+use super::{desktop_at, draw_command_panel, draw_desktop, draw_menu_content, draw_scrollbar,
+            draw_status_bar, draw_tab, draw_emulator_content, draw_shell_content,
+            draw_terminal_content, scrollbar_thumb, tab_char_at, CMD_INPUT_X, DESKTOP_AREA_LEN,
+            STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
 use crate::app::Application;
 use crate::cmd::CommandEntry;
 use crate::input;
@@ -56,6 +56,9 @@ pub fn render<W: std::io::Write>(
                     } else {
                         draw_terminal_content(&mut out, win, &term.path, &term.commands, term.panel_scroll);
                     }
+                } else if let Some(menu) = app.menu.as_ref() {
+                    // Start menu: manifest entries with the selection.
+                    draw_menu_content(&mut out, win, menu);
                 }
             }
         }
@@ -373,6 +376,7 @@ mod tests {
             desktop: 1,
             is_menu: false,
             terminal: Some(ts),
+            menu: None,
         }];
 
         let pointer = Pointer::new(20, 10);

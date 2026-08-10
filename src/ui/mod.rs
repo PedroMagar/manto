@@ -6,10 +6,12 @@ pub mod pointer;
 pub mod screen;
 pub mod window;
 
+mod menu_view;
 mod panel;
 mod render;
 mod terminal_view;
 
+pub use menu_view::draw_menu_content;
 pub use panel::draw_command_panel;
 pub use render::{compute_render_state, render};
 pub use terminal_view::{draw_emulator_content, draw_shell_content, draw_terminal_content,

@@ -18,7 +18,9 @@ impl Default for HeldState {
     }
 }
 
-static mut HELD_ARROWS: HeldState = HeldState::default();
+const HELD_ARROWS_NONE: HeldState = HeldState { up: false, down: false, left: false, right: false };
+
+static mut HELD_ARROWS: HeldState = HELD_ARROWS_NONE;
 static mut LAST_ARROW_TIME: Option<Instant> = None;
 
 pub fn enable_raw_mode() {

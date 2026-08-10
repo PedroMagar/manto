@@ -114,6 +114,35 @@ pub struct HeldArrowKeys {
 
 pub use platform::{clipboard_set, clipboard_get};
 
+/// Search PATH for an executable by name, honoring PATHEXT. App-execution
+/// alias directories (WindowsApps) are skipped: those reparse points cannot
+/// be started by `CreateProcessW` and direct the search to a real binary.
+#[cfg(windows)]
+pub fn find_on_path(program: &str) -> Option<String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+
+    for dir in std::env::split_paths(&path) {
+        if dir.to_string_lossy().contains("WindowsApps") {
+            continue;
+        }
+        let exact = dir.join(program);
+        if exact.is_file() {
+            return Some(exact.to_string_lossy().to_string());
+        }
+        for ext in pathext.split(';') {
+            if ext.is_empty() {
+                continue;
+            }
+            let candidate = dir.join(format!("{program}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
 // ── Platform ──────────────────────────────────────────────────────────────────
 //
 // Every platform module exports:
@@ -126,6 +155,25 @@ pub use platform::{clipboard_set, clipboard_get};
 //   clipboard_set/get      - best-effort OS clipboard
 
 pub use platform::{enable_raw_mode, disable_raw_mode, size, poll, read_key, held_arrow_keys};
+
+#[cfg(windows)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_on_path_resolves_system_executables() {
+        let found = find_on_path("cmd.exe").expect("cmd.exe is reachable on PATH");
+        assert!(found.ends_with("cmd.exe"), "wrong candidate: {found}");
+        assert!(!found.to_ascii_lowercase().contains("windowsapps"));
+    }
+
+    #[test]
+    fn find_on_path_respects_pathext() {
+        let found = find_on_path("powershell").expect("powershell.exe reachable on PATH");
+        assert!(found.to_ascii_lowercase().ends_with("powershell.exe"));
+    }
+}
 
 #[cfg(unix)]
 #[path = "unix.rs"]

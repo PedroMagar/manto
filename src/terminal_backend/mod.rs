@@ -70,6 +70,21 @@ impl CommandSession {
         })
     }
 
+    /// Spawn a session running `program` directly (interactive apps, editors,
+    /// REPLs). On Windows the bare program name is resolved through PATH so a
+    /// real executable is started even when `CreateProcessW` cannot handle
+    /// app-execution aliases; the piped fallback bootstraps the program
+    /// through `cmd` instead of silently swapping it for a shell.
+    pub fn spawn_app(program: &str, cwd: &str) -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel();
+        let platform = platform::spawn_app(program, cwd, tx)?;
+        Ok(Self {
+            receiver: rx,
+            platform,
+            closed_streams: 0,
+        })
+    }
+
     /// Drain pending output and check exit status.
     pub fn poll(&mut self) -> CommandPoll {
         let mut outputs = Vec::new();

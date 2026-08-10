@@ -498,6 +498,9 @@ impl Terminal {
             }
             b'J' => self.erase_display(param_or!(0)),
             b'K' => self.erase_line(param_or!(0)),
+            b'X' => self.erase_chars(param_or!(1).max(1) as usize),
+            b'P' => self.delete_chars(param_or!(1).max(1) as usize),
+            b'@' => self.insert_chars(param_or!(1).max(1) as usize),
             b'r' => {
                 let top = (param_or!(1)).saturating_sub(1);
                 let bottom = (param_or!(self.rows)).saturating_sub(1);
@@ -586,6 +589,49 @@ impl Terminal {
                 self.erase_display(2);
                 self.scrollback.clear();
             }
+        }
+    }
+
+    /// ECH: erase `n` cells at the cursor (filled with blanks, cursor stays).
+    fn erase_chars(&mut self, n: usize) {
+        let idx = self.cursor.y as usize * self.cols as usize + self.cursor.x as usize;
+        let end = (idx + n).min(self.cols as usize * self.rows as usize);
+        self.fill(idx, end.max(idx));
+    }
+
+    /// DCH: delete `n` cells at the cursor, shifting the rest of the line
+    /// left; cleared cells are blanked at the end of the line.
+    fn delete_chars(&mut self, n: usize) {
+        let row_start = self.cursor.y as usize * self.cols as usize;
+        let start = self.cursor.x as usize;
+        let cols = self.cols as usize;
+        let end = row_start + cols;
+        let n = n.min(cols - start);
+        if n == 0 {
+            return;
+        }
+        let cells = self.active_cells_mut();
+        cells.copy_within(row_start + start + n..end, row_start + start);
+        for cell in cells[end - n..end].iter_mut() {
+            *cell = Cell::default();
+        }
+    }
+
+    /// ICH: insert `n` blank cells at the cursor, shifting the rest of the
+    /// line right; cells pushed past the end of the line are lost.
+    fn insert_chars(&mut self, n: usize) {
+        let row_start = self.cursor.y as usize * self.cols as usize;
+        let start = self.cursor.x as usize;
+        let cols = self.cols as usize;
+        let end = row_start + cols;
+        let n = n.min(cols - start);
+        if n == 0 {
+            return;
+        }
+        let cells = self.active_cells_mut();
+        cells.copy_within(row_start + start..end - n, row_start + start + n);
+        for cell in cells[row_start + start..row_start + start + n].iter_mut() {
+            *cell = Cell::default();
         }
     }
 
@@ -750,6 +796,26 @@ mod tests {
         assert_eq!(text, "abGHef");
         t.process(b"\x1b[1;1H\x1b[K");
         assert_eq!(first_line(&t), ""); // line erased
+    }
+
+    #[test]
+    fn character_edit_controls_erase_and_shift() {
+        let mut t = term();
+        t.process(b"abcdef");
+        assert_eq!(first_line(&t), "abcdef");
+        // ECH (ESC[1X): erase the char under the cursor, cursor stays.
+        t.process(b"\x1b[1;6H\x1b[1X");
+        assert_eq!(first_line(&t), "abcde");
+        assert_eq!(t.cursor_pos(), (5, 0));
+        // DCH (ESC[1P): delete the char at the cursor, line shifts left.
+        t.process(b"\x1b[1;1H\x1b[1P");
+        assert_eq!(first_line(&t), "bcde");
+        // ICH (ESC[1@): insert a blank at the cursor, line shifts right.
+        t.process(b"\x1b[1;1H\x1b[1@");
+        assert_eq!(first_line(&t), " bcde");
+        // Multi-char variants (line is " bcde" before this step).
+        t.process(b"\x1b[1;1H\x1b[2P");
+        assert_eq!(first_line(&t), "cde");
     }
 
     #[test]

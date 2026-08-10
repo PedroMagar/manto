@@ -1,6 +1,7 @@
 use std::path::Path;
 use crate::app::Application;
 use crate::cmd::CommandEntry;
+use crate::menu::MenuItem;
 use crate::ui::TERMINAL_INPUT_PREFIX;
 use crate::ui::window::{Window, MIN_W, MIN_H};
 use crate::ui::pointer::Pointer;
@@ -514,16 +515,25 @@ pub fn split_active_terminal_window(
     ))
 }
 
-pub fn toggle_start_menu(applications: &mut Vec<Application>, current_desktop: usize, screen_h: u16, tab_scroll: &mut usize) -> bool {
+pub fn toggle_start_menu(
+    applications: &mut Vec<Application>,
+    current_desktop: usize,
+    screen_h: u16,
+    tab_scroll: &mut usize,
+    items: Vec<MenuItem>,
+) -> bool {
     if let Some(idx) = applications.iter().position(|a| a.on_desktop(current_desktop) && a.is_menu) {
         applications.remove(idx);
     } else {
         let usable_h = screen_h.saturating_sub(4);
         let win_h = (usable_h * 3 / 4).max(MIN_H);
         let pos_y = screen_h.saturating_sub(3).saturating_sub(win_h);
-        applications.push(Application::menu(
+        let longest = items.iter().map(|item| item.label.chars().count()).max().unwrap_or(0);
+        let win_w = (longest + 6).clamp(12, 48) as u16;
+        applications.push(Application::start_menu(
             "Start",
-            Window::new(2, pos_y, 20, win_h, 0).without_chrome(),
+            Window::new(2, pos_y, win_w, win_h, 0).without_chrome(),
+            items,
         ).with_desktop(current_desktop));
     }
     *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));

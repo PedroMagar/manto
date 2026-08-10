@@ -142,11 +142,28 @@ impl Drop for PlatformCommand {
 
 /// Spawn `command` (a shell path) attached to a fresh PTY.
 ///
-/// The child process runs /bin/sh (or the provided shell) interactively:
+/// The child process runs the shell interactively:
 ///   execvp(shell, shell -i)
 ///
 /// `command` is treated as the shell program to exec.
 pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+    let argv = [command.to_string(), "-i".to_string()];
+    spawn_pty(&argv, cwd, tx)
+}
+
+/// Spawn a program session (interactive app). The command line runs through
+/// `/bin/sh -lc`, so arguments parse like a typed command and bare names
+/// resolve through the shell.
+pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+    if program.trim().is_empty() {
+        let shell = crate::app::terminal::default_shell();
+        return spawn(&shell, cwd, tx);
+    }
+    let argv = ["/bin/sh".to_string(), "-lc".to_string(), program.to_string()];
+    spawn_pty(&argv, cwd, tx)
+}
+
+fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
     let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
     if master_fd < 0 {
         return Err("posix_openpt failed".to_string());
@@ -176,8 +193,10 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
     };
     pty_set_size(master_fd, rows.max(2), cols.max(2));
 
-    let shell_c = CString::new(command.as_bytes()).map_err(|_| "shell name has interior NUL".to_string())?;
-    let arg_i = CString::new("-i").unwrap();
+    let exec_c: Vec<CString> = argv.iter()
+        .map(|arg| CString::new(arg.as_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "argument has interior NUL".to_string())?;
     let slave_c = CString::new(slave_path.as_bytes()).map_err(|_| "slave path has interior NUL".to_string())?;
     let cwd_c = CString::new(cwd.as_bytes()).map_err(|_| "cwd has interior NUL".to_string())?;
 
@@ -201,9 +220,9 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
                     let _ = close(slave_fd);
                 }
                 let _ = chdir(cwd_c.as_ptr());
-                let argv: [*const i8; 3] = [shell_c.as_ptr(), arg_i.as_ptr(), std::ptr::null()];
-                let envp = std::ptr::null();
-                execve(shell_c.as_ptr(), argv.as_ptr(), envp);
+                let mut ptrs: Vec<*const i8> = exec_c.iter().map(|c| c.as_ptr()).collect();
+                ptrs.push(std::ptr::null());
+                execve(exec_c[0].as_ptr(), ptrs.as_ptr(), std::ptr::null());
                 libc::_exit(127);
             }
             pid => pid,

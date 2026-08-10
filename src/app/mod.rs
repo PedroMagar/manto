@@ -10,6 +10,7 @@ pub use terminal::TerminalState;
 use std::mem;
 
 use crate::cmd::CommandEntry;
+use crate::menu::{MenuItem, MenuState};
 use crate::ui::window::Window;
 
 pub struct Application {
@@ -20,6 +21,8 @@ pub struct Application {
     pub is_menu:  bool,
     /// Present in terminal windows; absent in plain windows.
     pub terminal: Option<TerminalState>,
+    /// Manifest entries shown when this is the start menu window.
+    pub menu:     Option<MenuState>,
 }
 
 pub enum DisplayMode {
@@ -32,11 +35,19 @@ impl Application {
     /// Create a plain windowed app.
     #[allow(dead_code)]
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: false, terminal: None }
+        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: false, terminal: None, menu: None }
     }
 
-    pub fn menu(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: true, terminal: None }
+    /// Create the start menu window carrying its manifest entries.
+    pub fn start_menu(title: impl Into<String>, window: Window, items: Vec<MenuItem>) -> Self {
+        Self {
+            title: title.into(),
+            display: DisplayMode::Windowed(window),
+            desktop: 1,
+            is_menu: true,
+            terminal: None,
+            menu: Some(MenuState::new(items)),
+        }
     }
 
     /// Create a terminal window with preloaded command history and a
@@ -49,6 +60,7 @@ impl Application {
                 desktop:  1,
                 is_menu:  false,
                 terminal: Some(ts),
+                menu:     None,
             },
             Err(_) => {
                 // Fallback to non-session mode if shell spawn fails
@@ -58,6 +70,7 @@ impl Application {
                     desktop:  1,
                     is_menu:  false,
                     terminal: Some(TerminalState::new(path, commands)),
+                    menu:     None,
                 }
             }
         }
@@ -79,6 +92,7 @@ impl Application {
                 desktop:  1,
                 is_menu:  false,
                 terminal: Some(ts),
+                menu:     None,
             },
             Err(_) => Self {
                 title:    title.into(),
@@ -86,6 +100,7 @@ impl Application {
                 desktop:  1,
                 is_menu:  false,
                 terminal: Some(TerminalState::new(path, Vec::new())),
+                menu:     None,
             },
         }
     }

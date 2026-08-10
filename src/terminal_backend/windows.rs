@@ -216,6 +216,34 @@ fn get_shell_path() -> String {
     std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
 }
 
+/// Resolve a bare program name to its real executable path (PATH + PATHEXT).
+///
+/// App-execution aliases (e.g. `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`)
+/// cannot be started by `CreateProcessW`; resolving through `PATH` finds a real
+/// binary so ConPTY sessions work for `python`, `node`, etc.
+fn resolve_program(command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return command.to_string();
+    }
+    let split_at = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let (program, rest) = trimmed.split_at(split_at);
+    if program.starts_with('"') || program.contains('/') || program.contains('\\') {
+        return command.to_string();
+    }
+    match crate::os::find_on_path(program) {
+        Some(path) => {
+            let path = if path.contains(' ') {
+                format!("\"{path}\"")
+            } else {
+                path
+            };
+            format!("{path}{rest}")
+        }
+        None => command.to_string(),
+    }
+}
+
 /// Try to host a persistent shell via ConPTY. Returns None if creation fails.
 fn try_spawn_conpty(
     command: &str,
@@ -482,7 +510,7 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
 
     // PowerShell with piped stdin is the most reliable persistent session in a
     // non-console host. Fall back to the requested shell if unavailable.
-    let mut child = {
+    let child = {
         let mut cmd = Command::new("powershell.exe");
         cmd.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", "-"])
             .current_dir(cwd)
@@ -509,6 +537,32 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
         }
     };
 
+    Ok(wire_pipe(child, tx))
+}
+
+/// Piped fallback for a program session: run the program through `cmd` so
+/// app-execution aliases and shell builtins resolve like they would in a
+/// real terminal. The program is never replaced by a generic shell.
+fn spawn_app_pipe(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PipeSession, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = Command::new("cmd.exe");
+    cmd.args(["/D", "/Q", "/C"])
+        .arg(program)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    let child = cmd.spawn().map_err(|err| format!("failed to spawn program: {err}"))?;
+
+    Ok(wire_pipe(child, tx))
+}
+
+/// Wire a child process's piped stdio into the session: an input forwarding
+/// thread plus stdout/stderr reader threads feeding `tx`.
+fn wire_pipe(mut child: Child, tx: Sender<TerminalUpdate>) -> PipeSession {
     let stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -538,12 +592,12 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
         let _ = tx_err.send(TerminalUpdate::Closed);
     });
 
-    Ok(PipeSession {
+    PipeSession {
         child: Some(child),
         input_tx,
         input_thread: Some(input_thread),
         closed: false,
-    })
+    }
 }
 
 // ── Public platform surface ───────────────────────────────────────────────────
@@ -648,13 +702,29 @@ fn conpty_is_viable(command: &str, cwd: &str) -> bool {
 /// Spawn a persistent shell session, preferring ConPTY and falling back to
 /// anonymous pipes when the host cannot attach a child to a pseudo console.
 pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
-    let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(command, cwd));
+    let command = resolve_program(command);
+    let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&command, cwd));
     if viable {
-        if let Some(conpty) = try_spawn_conpty(command, cwd, tx.clone()) {
+        if let Some(conpty) = try_spawn_conpty(&command, cwd, tx.clone()) {
             return Ok(PlatformCommand::Conpty(conpty));
         }
     }
-    Ok(PlatformCommand::Pipe(spawn_pipe(command, cwd, tx)?))
+    Ok(PlatformCommand::Pipe(spawn_pipe(&command, cwd, tx)?))
+}
+
+/// Spawn a program session (interactive app) directly, preferring ConPTY. The
+/// piped fallback runs the program through `cmd` so aliases and builtins
+/// resolve the way a shell would resolve them — the requested program is
+/// never silently replaced.
+pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+    let program = resolve_program(program);
+    let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&program, cwd));
+    if viable {
+        if let Some(conpty) = try_spawn_conpty(&program, cwd, tx.clone()) {
+            return Ok(PlatformCommand::Conpty(conpty));
+        }
+    }
+    Ok(PlatformCommand::Pipe(spawn_app_pipe(&program, cwd, tx)?))
 }
 
 #[cfg(test)]
@@ -828,5 +898,60 @@ mod tests {
         {
             let _ = (super::spawn, "noop");
         }
+    }
+
+    #[test]
+    fn resolve_program_keeps_explicit_paths_intact() {
+        assert_eq!(resolve_program(""), "");
+        assert_eq!(resolve_program(r"C:\tools\foo.exe -a"), r"C:\tools\foo.exe -a");
+        assert_eq!(
+            resolve_program("\"C:\\Program Files\\x\\y.exe\" --flag"),
+            "\"C:\\Program Files\\x\\y.exe\" --flag",
+        );
+        assert_eq!(resolve_program("vim file.txt"), "vim file.txt");
+    }
+
+    #[test]
+    fn resolve_program_finds_real_executables() {
+        // cmd.exe resolves to its System32 location, unchanged when already
+        // an absolute path, and keeps any trailing arguments.
+        let resolved = resolve_program("cmd.exe");
+        assert!(resolved.to_ascii_lowercase().ends_with("cmd.exe"), "unresolved: {resolved}");
+        assert!(resolved.to_ascii_lowercase().contains("system32"), "expected a real path: {resolved}");
+
+        let with_args = resolve_program("cmd.exe /C doskey");
+        let lower = with_args.to_ascii_lowercase();
+        assert!(
+            lower.ends_with("cmd.exe /c doskey") || lower.ends_with("cmd.exe/c doskey"),
+            "unexpected: {with_args}"
+        );
+    }
+
+    #[test]
+    fn spawn_app_runs_the_requested_program() {
+        use crate::terminal_backend::CommandSession;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let program = "cmd.exe";
+
+        let mut app = CommandSession::spawn_app(program, &cwd).unwrap();
+        let marker = "manto_app_marker_3388";
+        let line = format!("echo {marker}\r\n");
+        app.write(line.as_bytes());
+
+        let start = std::time::Instant::now();
+        let mut saw_marker = false;
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            for chunk in &app.poll().outputs {
+                let text = String::from_utf8_lossy(chunk).into_owned();
+                if text.contains(marker) {
+                    saw_marker = true;
+                }
+            }
+            if saw_marker {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(saw_marker, "requested program session did not echo the marker");
     }
 }
