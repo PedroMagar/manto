@@ -38,6 +38,14 @@ pub struct Desktop {
     pub applications: Vec<Application>,
     pub history: History,
     pub commands: Vec<CommandEntry>,
+    /// Text of the last rendered frame (free screen selection source).
+    pub screen: crate::ui::screen::ScreenGrid,
+    /// Free screen selection box (screen row/col).
+    pub sel: Option<crate::ui::screen::BoxSelect>,
+    /// Cell where the selection cursor sits (x, y).
+    pub sel_pos: Option<(u16, u16)>,
+    /// Manto clipboard (in-memory), synced to the OS clipboard on copy.
+    pub clipboard: String,
     /// Set when the user requests quit (Ctrl+Delete).
     pub quit: bool,
 }
@@ -82,6 +90,10 @@ impl Desktop {
             applications,
             history,
             commands,
+            screen: crate::ui::screen::ScreenGrid::new(last_size.0, last_size.1),
+            sel: None,
+            sel_pos: None,
+            clipboard: String::new(),
             quit: false,
         }
     }
@@ -111,7 +123,44 @@ impl Desktop {
             self.panel_scroll,
             self.current_desktop,
             focused_term,
+            &mut self.screen,
+            self.sel.as_ref(),
         );
+    }
+
+    /// Extend the free screen selection in `dir`, seeded from the pointer.
+    fn extend_screen_selection(&mut self, dir: (i32, i32)) {
+        let (w, h) = (self.last_size.0.max(1) as usize, self.last_size.1.max(1) as usize);
+        let pos = self.sel_pos.unwrap_or((self.pointer.x, self.pointer.y));
+        let origin = match self.sel {
+            Some(s) => s.anchor,
+            None => (pos.1 as usize, pos.0 as usize),
+        };
+        let (mut r, mut c) = (pos.1 as i32, pos.0 as i32);
+        r = (r + dir.1).clamp(0, (h - 1) as i32);
+        c = (c + dir.0).clamp(0, (w - 1) as i32);
+        self.sel_pos = Some((c as u16, r as u16));
+        self.sel = Some(crate::ui::screen::BoxSelect { anchor: origin, extent: (r as usize, c as usize) });
+    }
+
+    /// Copy the free screen selection (the visible box under selection) to the
+    /// OS + internal clipboards. Returns true when copied.
+    fn copy_screen_selection(&mut self) -> bool {
+        let Some(sel) = self.sel else { return false };
+        let (top, bottom, left, right) = sel.bounds();
+        let text = self.screen.box_text(left, top, right, bottom);
+        self.clipboard = text.clone();
+        let _ = crate::os::clipboard_set(&text);
+        self.sel = None;
+        self.sel_pos = None;
+        true
+    }
+
+    /// Read clipboard text: OS clipboard first, Manto in-memory fallback.
+    fn read_clipboard(&self) -> Option<String> {
+        crate::os::clipboard_get().or_else(|| {
+            if self.clipboard.is_empty() { None } else { Some(self.clipboard.clone()) }
+        })
     }
 
     /// Read and handle one key event. Returns true when a redraw is needed.
@@ -175,6 +224,10 @@ impl Desktop {
         if size_changed {
             self.pointer.y = new_size.1 - (self.last_size.1 - self.pointer.y);
             self.last_size = new_size;
+            self.screen.resize(new_size.0, new_size.1);
+            if self.sel.is_some() {
+                self.sel = None; // geometry changed: drop the stale box
+            }
             self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
             self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
         }
@@ -320,6 +373,11 @@ impl Desktop {
             }
 
             Key::CtrlC => {
+                // Free screen selection copies with Ctrl+C.
+                if self.copy_screen_selection() {
+                    mode_changed = true;
+                    return mode_changed;
+                }
                 let focused_idx = match &self.mode {
                     Mode::TerminalFocus { app_idx } => Some(*app_idx),
                     _ => None,
@@ -366,6 +424,21 @@ impl Desktop {
     fn key_normal(&mut self, key: Key) -> bool {
         let mut mode_changed = false;
         match key {
+            Key::Escape if self.sel.is_some() => {
+                // Clear the free selection without leaving normal mode.
+                self.sel = None;
+                self.sel_pos = None;
+                mode_changed = true;
+            }
+            Key::Enter if self.sel.is_some() => {
+                // Copy the selected screen box.
+                mode_changed = self.copy_screen_selection();
+            }
+            Key::ShiftUp | Key::ShiftDown | Key::ShiftLeft | Key::ShiftRight => {
+                // Free screen selection: anchor at the pointer, follow the arrows.
+                self.extend_screen_selection(arrow_dir(key));
+                mode_changed = true;
+            }
             Key::AltUp | Key::AltDown | Key::AltLeft | Key::AltRight => {
                 if let Some(region) = resolve_snap_region(&key, os::held_arrow_keys()) {
                     if snap_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.0, self.last_size.1, region) {
@@ -508,8 +581,15 @@ impl Desktop {
                                     let app = self.applications.remove(top_idx);
                                     self.applications.push(app);
                                 }
-                                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, self.applications.len() - 1, self.last_size.0, self.last_size.1);
-                                self.mode = Mode::TerminalFocus { app_idx: self.applications.len() - 1 };
+                                let final_idx = self.applications.len() - 1;
+                                // Interactive sessions keep the pointer where it
+                                // was placed (it anchors the box selection).
+                                let interactive = self.applications[final_idx]
+                                    .terminal.as_ref().map_or(false, |t| t.interactive);
+                                if !interactive {
+                                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, final_idx, self.last_size.0, self.last_size.1);
+                                }
+                                self.mode = Mode::TerminalFocus { app_idx: final_idx };
                                 mode_changed = true;
                             }
 
@@ -856,6 +936,9 @@ impl Desktop {
                 self.mode = Mode::Normal;
                 mode_changed = true;
             }
+            Key::Enter => {
+                mode_changed |= self.run_terminal_line(app_idx);
+            }
             Key::PageUp => {
                 if let Some(t) = self.applications[app_idx].terminal.as_mut() {
                     t.panel_scroll = t.panel_scroll.saturating_add(1);
@@ -926,40 +1009,6 @@ impl Desktop {
                                 if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
                                     mode_changed = true;
                                 }
-                            }
-                            Key::Enter => {
-                                let cmd = t.cmd_input.trim().to_string();
-                                if !cmd.is_empty() {
-                                    // Local echo + send to the shell.
-                                    if t.has_session() {
-                                        t.push_shell_line(cmd.clone());
-                                        // Record in the local navigation history.
-                                        t.commands.push(CommandEntry::completed(&cmd, &t.path, Vec::new()));
-                                        const MAX_HISTORY: usize = 200;
-                                        if t.commands.len() > MAX_HISTORY {
-                                            t.commands.drain(..t.commands.len() - MAX_HISTORY);
-                                        }
-                                        // Known REPLs: in the pipe fallback (no real PTY) the
-                                        // interactive form requires `-i`; rewrite transparently.
-                                        // Send with a `\r\n` line ending (Python and many programs
-                                        // require `\n`; a bare `\r` does not make them process the
-                                        // line). REPL exit commands (exit/quit) only terminate the
-                                        // child, not the session — clear REPL mode so the window
-                                        // returns to normal.
-                                        if t.repl_prompt.is_some() && is_repl_exit(&cmd) {
-                                            t.clear_repl();
-                                        }
-                                        let line = format!("{}\r\n", interactive_command(&cmd));
-                                        if let Some(ref mut session) = t.shell_session {
-                                            session.write(line.as_bytes());
-                                        }
-                                    }
-                                    t.cmd_input.clear();
-                                    t.input_cursor = 0;
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                    t.panel_scroll = 0;
-                                }
-                                mode_changed = true;
                             }
                             Key::CtrlD => {
                                 // EOF/EOF-ish for tools that use Ctrl+D (python 3, shells).
@@ -1059,7 +1108,7 @@ impl Desktop {
             }
             Key::PageUp | Key::PageDown => {
                 // Scroll Manto's scrollback view; the app never sees these.
-                if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                if let Some(t) = self.applications[app_idx].terminal.as_mut() {
                     match key {
                         Key::PageUp => t.panel_scroll = t.panel_scroll.saturating_add(1),
                         _ => t.panel_scroll = t.panel_scroll.saturating_sub(1),
@@ -1067,32 +1116,100 @@ impl Desktop {
                 }
                 true
             }
-            _ => {
-                let is_enter = matches!(key, Key::Enter | Key::CtrlEnter);
-                let bytes = crate::app::terminal::key_to_bytes(key);
-                if let Some(bytes) = bytes {
-                    if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                        let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
-                        // Piped fallback has no real echo: mirror typed input
-                        // into the emulator so it stays visible.
-                        if !is_pty {
+            Key::Enter | Key::CtrlEnter => self.forward_interactive(app_idx, key, true),
+            Key::CtrlC => self.forward_interactive(app_idx, key, false),
+            Key::CtrlV => {
+                // Paste: OS clipboard first, Manto in-memory fallback.
+                let text = self.read_clipboard();
+                if let Some(text) = text {
+                    if !text.is_empty() {
+                        if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                            if let Some(ref mut s) = t.shell_session {
+                                let _ = s.write(text.as_bytes());
+                            }
                             if let Some(em) = t.emulator.as_mut() {
-                                if is_enter {
-                                    em.process(b"\r\n");
-                                } else {
-                                    em.process(&bytes);
+                                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
+                                if !is_pty {
+                                    em.process(text.as_bytes());
                                 }
                             }
                         }
-                        if let Some(ref mut s) = t.shell_session {
-                            let _ = s.write(&bytes);
+                    }
+                }
+                true
+            }
+            _ => self.forward_interactive(app_idx, key, false),
+        }
+    }
+
+    /// Forward a key raw to the session, with Manto-side local echo when the
+    /// backend has no real PTY.
+    fn forward_interactive(&mut self, app_idx: usize, key: Key, enter: bool) -> bool {
+        let bytes = crate::app::terminal::key_to_bytes(key);
+        if let Some(bytes) = bytes {
+            if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
+                // Piped fallback has no real echo: mirror input into the emulator.
+                if !is_pty {
+                    if let Some(em) = t.emulator.as_mut() {
+                        if enter {
+                            em.process(b"\r\n");
+                        } else {
+                            em.process(&bytes);
                         }
                     }
                 }
-                // Redraw: the app may repaint even when the key maps to nothing.
-                true
+                if let Some(ref mut s) = t.shell_session {
+                    let _ = s.write(&bytes);
+                }
             }
         }
+        true
+    }
+
+    /// Send the `.>` line: to the session (classic line mode) or, without a
+    /// session, through the command runner. Resets the input bar.
+    fn run_terminal_line(&mut self, app_idx: usize) -> bool {
+        let Some(t) = self.applications[app_idx].terminal.as_mut() else {
+            return false;
+        };
+        let is_session = t.shell_session.is_some();
+        let cmd = t.cmd_input.trim().to_string();
+        if !cmd.is_empty() {
+            if is_session {
+                if let Some(ref mut session) = t.shell_session {
+                    let line = format!("{}\r\n", interactive_command(&cmd));
+                    session.write(line.as_bytes());
+                }
+                t.commands.push(CommandEntry::completed(&cmd, &t.path, Vec::new()));
+                const MAX_HISTORY: usize = 200;
+                if t.commands.len() > MAX_HISTORY {
+                    t.commands.drain(..t.commands.len() - MAX_HISTORY);
+                }
+                if t.repl_prompt.is_some() && is_repl_exit(&cmd) {
+                    t.clear_repl();
+                }
+            } else {
+                push_shell_command(&mut t.commands, &mut t.path, &cmd);
+            }
+            t.cmd_input.clear();
+            t.input_cursor = 0;
+            input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+            t.panel_scroll = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Direction vector (dx, dy) for arrow keys.
+fn arrow_dir(key: Key) -> (i32, i32) {
+    match key {
+        Key::Up | Key::ShiftUp => (0, -1),
+        Key::Down | Key::ShiftDown => (0, 1),
+        Key::Left | Key::ShiftLeft => (-1, 0),
+        _ => (1, 0),
     }
 }
 

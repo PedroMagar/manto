@@ -92,6 +92,10 @@ pub fn key_to_bytes(key: Key) -> Option<Vec<u8>> {
         Key::Down => buf.extend_from_slice(b"\x1b[B"),
         Key::Right => buf.extend_from_slice(b"\x1b[C"),
         Key::Left => buf.extend_from_slice(b"\x1b[D"),
+        Key::ShiftUp => buf.extend_from_slice(b"\x1b[1;2A"),
+        Key::ShiftDown => buf.extend_from_slice(b"\x1b[1;2B"),
+        Key::ShiftRight => buf.extend_from_slice(b"\x1b[1;2C"),
+        Key::ShiftLeft => buf.extend_from_slice(b"\x1b[1;2D"),
         Key::AltUp => buf.extend_from_slice(b"\x1b[1;3A"),
         Key::AltDown => buf.extend_from_slice(b"\x1b[1;3B"),
         Key::AltRight => buf.extend_from_slice(b"\x1b[1;3C"),
@@ -307,6 +311,7 @@ impl TerminalState {
     }
 
     /// True if the terminal window has an active shell session.
+    #[allow(dead_code)]
     pub fn has_session(&self) -> bool {
         self.shell_session.is_some()
     }
@@ -372,6 +377,8 @@ mod tests {
         use crate::os::Key;
         assert_eq!(key_to_bytes(Key::Enter).unwrap(), b"\r");
         assert_eq!(key_to_bytes(Key::Up).unwrap(), b"\x1b[A");
+        assert_eq!(key_to_bytes(Key::ShiftLeft).unwrap(), b"\x1b[1;2D");
+        assert_eq!(key_to_bytes(Key::ShiftUp).unwrap(), b"\x1b[1;2A");
         assert_eq!(key_to_bytes(Key::PageUp).unwrap(), b"\x1b[5~");
         assert_eq!(key_to_bytes(Key::Delete).unwrap(), b"\x1b[3~");
         assert_eq!(key_to_bytes(Key::CtrlC).unwrap(), b"\x03");

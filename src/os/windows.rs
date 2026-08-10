@@ -30,6 +30,9 @@ const LEFT_CTRL:       Dword = 0x0008;
 const RIGHT_CTRL:      Dword = 0x0004;
 const LEFT_ALT:        Dword = 0x0002;
 const RIGHT_ALT:       Dword = 0x0001;
+const VK_SHIFT:        i32   = 0x10;
+const GMEM_MOVEABLE:   Dword = 0x0002;
+const CF_UNICODETEXT:  Dword = 13;
 
 // INPUT_RECORD: WORD EventType (2) + WORD pad (2) + union Event (16 bytes)
 #[repr(C)]
@@ -55,6 +58,19 @@ unsafe extern "system" {
     fn PeekConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
     fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut Dword) -> Bool;
     fn GetKeyState(n_virt_key: i32) -> i16;
+}
+
+unsafe extern "system" {
+    fn OpenClipboard(h: Handle) -> Bool;
+    fn EmptyClipboard() -> Bool;
+    fn SetClipboardData(u_format: Dword, h_mem: Handle) -> Handle;
+    fn GetClipboardData(u_format: Dword) -> Handle;
+    fn CloseClipboard() -> Bool;
+    fn GlobalAlloc(u_flags: Dword, dw_bytes: usize) -> Handle;
+    fn GlobalLock(h_mem: Handle) -> *mut u8;
+    fn GlobalUnlock(h_mem: Handle) -> Bool;
+    fn GlobalFree(h_mem: Handle) -> Handle;
+    fn GlobalSize(h_mem: Handle) -> usize;
 }
 
 static mut ORIG_IN_MODE:  Dword = 0;
@@ -169,6 +185,7 @@ pub fn read_key() -> Key {
             let ch   = ke_char(&rec.event);
             let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
             let alt  = ke_ctrl(&rec.event) & (LEFT_ALT | RIGHT_ALT) != 0;
+            let shift = GetKeyState(VK_SHIFT) as u16 & 0x8000 != 0;
 
             if ctrl && vk == 0x31 { return Key::Ctrl1; }
             if ctrl && vk == 0x32 { return Key::Ctrl2; }
@@ -216,10 +233,10 @@ pub fn read_key() -> Key {
                 0x22 => return Key::PageDown,
                 0x23 => return Key::End,
                 0x24 => return Key::Home,
-                0x26 => return Key::Up,
-                0x28 => return Key::Down,
-                0x25 => return Key::Left,
-                0x27 => return Key::Right,
+                0x26 => return if shift { Key::ShiftUp } else { Key::Up },
+                0x28 => return if shift { Key::ShiftDown } else { Key::Down },
+                0x25 => return if shift { Key::ShiftLeft } else { Key::Left },
+                0x27 => return if shift { Key::ShiftRight } else { Key::Right },
                 _ => {}
             }
 
@@ -238,5 +255,72 @@ pub fn held_arrow_keys() -> super::HeldArrowKeys {
             left: GetKeyState(0x25) as u16 & 0x8000 != 0,
             right: GetKeyState(0x27) as u16 & 0x8000 != 0,
         }
+    }
+}
+
+// ── Clipboard (Win32 FFI) ─────────────────────────────────────────────────────
+
+/// Write `text` (Unicode) to the system clipboard. Returns true on success.
+pub fn clipboard_set(text: &str) -> bool {
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            let _ = CloseClipboard();
+            return false;
+        }
+
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let size = wide.len() * 2;
+        let h = GlobalAlloc(GMEM_MOVEABLE, size);
+        if h.is_null() {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let p = GlobalLock(h);
+        if p.is_null() {
+            let _ = GlobalFree(h);
+            let _ = CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p as *mut u16, wide.len());
+        let _ = GlobalUnlock(h);
+
+        if SetClipboardData(CF_UNICODETEXT, h).is_null() {
+            let _ = GlobalFree(h);
+            let _ = CloseClipboard();
+            return false;
+        }
+        let _ = CloseClipboard();
+        true
+    }
+}
+
+/// Read the system clipboard as a String (Unicode). None when unavailable.
+pub fn clipboard_get() -> Option<String> {
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(CF_UNICODETEXT);
+        if h.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let p = GlobalLock(h);
+        if p.is_null() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let size = (GlobalSize(h) / 2).min(1 << 20) as usize;
+        let mut v: Vec<u16> = vec![0u16; size];
+        std::ptr::copy_nonoverlapping(p as *const u16, v.as_mut_ptr(), size);
+        let _ = GlobalUnlock(h);
+        let _ = CloseClipboard();
+        while v.last() == Some(&0) {
+            v.pop();
+        }
+        Some(String::from_utf16_lossy(&v))
     }
 }

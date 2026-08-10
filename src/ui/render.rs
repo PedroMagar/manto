@@ -1,8 +1,11 @@
 // Full-frame composition: draws the desktop, windows, tabs, panels, status
 // bar, input rows, and the pointer in a single pass.
 
+use std::io::Write;
+
 use super::ansi;
 use super::pointer::Pointer;
+use super::screen::{BoxSelect, ScreenGrid, StampWriter};
 use super::window::{MIN_W, MIN_H};
 use super::{desktop_at, draw_command_panel, draw_desktop, draw_scrollbar, draw_status_bar,
             draw_tab, draw_emulator_content, draw_shell_content, draw_terminal_content,
@@ -29,24 +32,29 @@ pub fn render<W: std::io::Write>(
     panel_scroll: usize,
     current_desktop: usize,
     focused_terminal: Option<(usize, &str, usize)>,
+    grid: &mut ScreenGrid,
+    selection: Option<&BoxSelect>,
 ) {
-    ansi::clear(out);
+    // Capture the rendered frame's text while forwarding everything unchanged.
+    let mut out = StampWriter::new(out, grid);
 
-    draw_desktop(out, 1, w, h, "Manto");
+    ansi::clear(&mut out);
+
+    draw_desktop(&mut out, 1, w, h, "Manto");
 
     for (app_idx, app) in applications.iter().enumerate() {
         if app.on_desktop(current_desktop) {
             if let Some(win) = app.window() {
-                win.draw(out, &app.title);
+                win.draw(&mut out, &app.title);
                 if let Some(term) = app.terminal.as_ref() {
                     if let Some(em) = term.emulator.as_ref() {
                         // Interactive terminal: full emulator grid + cursor.
                         let focused = focused_terminal.map(|(i, _, _)| i) == Some(app_idx);
-                        draw_emulator_content(out, win, em, term.panel_scroll, focused);
+                        draw_emulator_content(&mut out, win, em, term.panel_scroll, focused);
                     } else if term.shell_session.is_some() {
-                        draw_shell_content(out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
+                        draw_shell_content(&mut out, win, &term.shell_lines, term.panel_scroll, term.repl_prompt.as_deref());
                     } else {
-                        draw_terminal_content(out, win, &term.path, &term.commands, term.panel_scroll);
+                        draw_terminal_content(&mut out, win, &term.path, &term.commands, term.panel_scroll);
                     }
                 }
             }
@@ -65,33 +73,33 @@ pub fn render<W: std::io::Write>(
                 && pointer.y >= tab_y
                 && pointer.y < tab_y + tab_h;
             let offset = if is_hovered { scroll_offset } else { 0 };
-            draw_tab(out, tab_x, tab_y, tab_h, &applications[app_idx].title, offset);
+            draw_tab(&mut out, tab_x, tab_y, tab_h, &applications[app_idx].title, offset);
         }
-        draw_scrollbar(out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
+        draw_scrollbar(&mut out, sb_x, sb_top, sb_bot, minimized_count, tabs.len(), tab_scroll);
     }
 
     if let Some((idx, pw, ph)) = resize_preview {
         if applications[idx].on_desktop(current_desktop) {
             if let Some(win) = applications[idx].window() {
-                win.draw_preview(out, pw, ph);
+                win.draw_preview(&mut out, pw, ph);
             }
         }
     }
 
-    draw_command_panel(out, w, h, path, commands, panel_scroll);
-    draw_status_bar(out, w, h, path, !commands.is_empty(), current_desktop);
+    draw_command_panel(&mut out, w, h, path, commands, panel_scroll);
+    draw_status_bar(&mut out, w, h, path, !commands.is_empty(), current_desktop);
 
     let start_end = STATUS_START_X + STATUS_START.len() as u16;
     if pointer.y == h - 2 && pointer.x >= STATUS_START_X && pointer.x < start_end {
-        ansi::move_to(out, STATUS_START_X, h - 2);
-        write!(out, "{}{}{}", ansi::REVERSE, STATUS_START, ansi::RESET).unwrap();
+        ansi::move_to(&mut out, STATUS_START_X, h - 2);
+        write!(&mut out, "{}{}{}", ansi::REVERSE, STATUS_START, ansi::RESET).unwrap();
     }
 
     if let Some(d) = desktop_at(pointer.x, pointer.y, w, h) {
         let base_x = w.saturating_sub(1 + DESKTOP_AREA_LEN);
         let sep_x  = base_x + (d as u16 - 1) * 4;
-        ansi::move_to(out, sep_x + 1, h - 2);
-        write!(out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
+        ansi::move_to(&mut out, sep_x + 1, h - 2);
+        write!(&mut out, "{} {} {}", ansi::REVERSE, d, ansi::RESET).unwrap();
     }
 
     let input_active = typing_input.is_some() || focused_terminal.is_some();
@@ -99,17 +107,17 @@ pub fn render<W: std::io::Write>(
     if let Some((input, cursor_pos)) = typing_input {
         let max_len = (w - 2).saturating_sub(CMD_INPUT_X) as usize;
         let (display, cursor_col) = input::input_view(input, cursor_pos, max_len);
-        ansi::move_to(out, CMD_INPUT_X, h - 2);
-        write!(out, "{:<width$}", display, width = max_len).unwrap();
-        ansi::move_to(out, CMD_INPUT_X + cursor_col as u16, h - 2);
-        ansi::show_cursor(out);
+        ansi::move_to(&mut out, CMD_INPUT_X, h - 2);
+        write!(&mut out, "{:<width$}", display, width = max_len).unwrap();
+        ansi::move_to(&mut out, CMD_INPUT_X + cursor_col as u16, h - 2);
+        ansi::show_cursor(&mut out);
     } else if let Some((term_idx, term_input, cursor_pos)) = focused_terminal {
         let interactive_mode = applications.get(term_idx)
             .and_then(|a| a.terminal.as_ref())
             .map_or(false, |t| t.interactive);
         if interactive_mode {
             // Interactive terminals draw their own cursor in the grid.
-            ansi::hide_cursor(out);
+            ansi::hide_cursor(&mut out);
         } else if let Some(win) = applications.get(term_idx)
             .filter(|a| a.on_desktop(current_desktop))
             .and_then(|a| a.window())
@@ -126,14 +134,14 @@ pub fn render<W: std::io::Write>(
                 let (display, cursor_col) = input::input_view(term_input, cursor_pos, max_len);
                 let cursor_x   = win.position_x + 1 + prefix_len as u16;
                 let cursor_y   = win.position_y + win.height - 2;
-                ansi::move_to(out, cursor_x, cursor_y);
-                write!(out, "{:<width$}", display, width = max_len).unwrap();
-                ansi::move_to(out, cursor_x + cursor_col as u16, cursor_y);
-                ansi::show_cursor(out);
+                ansi::move_to(&mut out, cursor_x, cursor_y);
+                write!(&mut out, "{:<width$}", display, width = max_len).unwrap();
+                ansi::move_to(&mut out, cursor_x + cursor_col as u16, cursor_y);
+                ansi::show_cursor(&mut out);
             }
         }
     } else {
-        ansi::hide_cursor(out);
+        ansi::hide_cursor(&mut out);
     }
     let effective_cursor = cursor_interaction.or_else(|| {
         let px = pointer.x;
@@ -180,8 +188,21 @@ pub fn render<W: std::io::Write>(
 
         None
     });
+
+    if let Some(sel) = selection {
+        // Free screen selection overlay: invert every cell of the box.
+        let (top, bottom, left, right) = sel.bounds();
+        for y in top..=bottom {
+            for x in left..=right {
+                let ch = out.grid().char_at(x, y);
+                ansi::move_to(&mut out, x as u16, y as u16);
+                write!(&mut out, "{}{}{}", ansi::REVERSE, ch, ansi::RESET).unwrap();
+            }
+        }
+    }
+
     if !input_active {
-        pointer.draw(out, effective_cursor);
+        pointer.draw(&mut out, effective_cursor);
     }
 
     out.flush().unwrap();
@@ -284,11 +305,13 @@ mod tests {
         let pointer = Pointer::new(20, 10);
         let focused_term = Some((0, "", 0));
         let mut buf = Vec::new();
+        let mut grid = crate::ui::screen::ScreenGrid::new(w, h);
         render(
             &mut buf,
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, focused_term,
+            &mut grid, None,
         );
 
         let bad = out_of_bounds_moves(&buf, w, h);
@@ -312,11 +335,13 @@ mod tests {
         assert!(applications[0].terminal.as_ref().unwrap().has_session());
         let pointer = Pointer::new(20, 10);
         let mut buf = Vec::new();
+        let mut grid = crate::ui::screen::ScreenGrid::new(w, h);
         render(
             &mut buf,
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, None,
+            &mut grid, None,
         );
         let bad = out_of_bounds_moves(&buf, w, h);
         assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");
@@ -352,11 +377,13 @@ mod tests {
 
         let pointer = Pointer::new(20, 10);
         let mut buf = Vec::new();
+        let mut grid = crate::ui::screen::ScreenGrid::new(w, h);
         render(
             &mut buf,
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, Some((0, "", 0)),
+            &mut grid, None,
         );
         let bad = out_of_bounds_moves(&buf, w, h);
         assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");

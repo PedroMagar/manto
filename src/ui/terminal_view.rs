@@ -47,7 +47,7 @@ pub fn terminal_content_width(path: &str, commands: &[CommandEntry]) -> usize {
 ///   rows 1 .. h-4  : command history (same priority rules as the global panel)
 ///   row  h-3       : ├─ path ─────────────────────────────────────────────────┤
 ///   row  h-2       : │ .> input                                               │
-///   row  h-1       : └─────────────────────────────────────────────────────────┘  (chrome)
+///   row  h-1       : └────────────────────────────────────────────────────────┘  (chrome)
 ///
 /// Requires `win.height >= 5`; otherwise it is a no-op.
 pub fn draw_terminal_content(
@@ -124,7 +124,7 @@ pub fn draw_terminal_content(
 /// Inner layout (top to bottom):
 ///   rows 1 .. h-4  : shell output (scrollable; right column = vertical scrollbar)
 ///   row  h-3       : ├─ path ────────────────────────────────────────────────┤
-///   row  h-2       : │ .> (input row; content of the focused terminal)        │
+///   row  h-2       : │ .> (input row; content of the focused terminal)       │
 ///   row  h-1       : (bottom border, rendered by the chrome)
 ///
 /// When `repl` is Some (a fullscreen REPL is active, e.g. Python ">>>"), the

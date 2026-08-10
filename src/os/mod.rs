@@ -57,6 +57,10 @@ pub enum Key {
     Down,
     Left,
     Right,
+    ShiftUp,
+    ShiftDown,
+    ShiftLeft,
+    ShiftRight,
     Tab,
     Enter,
     Backspace,
@@ -105,6 +109,11 @@ pub struct HeldArrowKeys {
     pub right: bool,
 }
 
+// ── Clipboard bridge (best-effort, no deps) ──────────────────────────────────
+// Windows uses Win32 FFI; Unix shells out to xclip/xsel/wl-copy when present.
+
+pub use platform::{clipboard_set, clipboard_get};
+
 // ── Platform ──────────────────────────────────────────────────────────────────
 //
 // Every platform module exports:
@@ -114,6 +123,7 @@ pub struct HeldArrowKeys {
 //   poll(ms: u64) -> bool  - true if input is available within the timeout
 //   read_key() -> Key      - read and decode the next key
 //   held_arrow_keys()      - arrow keys currently held (for quadrant snapping)
+//   clipboard_set/get      - best-effort OS clipboard
 
 pub use platform::{enable_raw_mode, disable_raw_mode, size, poll, read_key, held_arrow_keys};
 

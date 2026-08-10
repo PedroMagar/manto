@@ -136,6 +136,10 @@ pub fn read_key() -> Key {
                                                 (b"1;3", b'B') | (b"3", b'B') => return Key::AltDown,
                                                 (b"1;3", b'C') | (b"3", b'C') => return Key::AltRight,
                                                 (b"1;3", b'D') | (b"3", b'D') => return Key::AltLeft,
+                                                (b"1;2", b'A') => return Key::ShiftUp,
+                                                (b"1;2", b'B') => return Key::ShiftDown,
+                                                (b"1;2", b'C') => return Key::ShiftRight,
+                                                (b"1;2", b'D') => return Key::ShiftLeft,
                                                 _ => continue,
                                             }
                                         }
@@ -208,4 +212,79 @@ pub fn held_arrow_keys() -> super::HeldArrowKeys {
             right: HELD_ARROWS.right,
         }
     }
+}
+
+// ── Clipboard (external tools, best-effort) ──────────────────────────────────
+// Uses xclip/xsel (X11) or wl-copy/wl-paste (Wayland) when present; Manto keeps
+// an in-memory fallback if none is available.
+
+fn tool_ok(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn clipboard_set(text: &str) -> bool {
+    const SETTERS: [(&str, &[&str]); 3] = [
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("wl-copy", &[]),
+    ];
+    for (tool, args) in SETTERS {
+        if !tool_ok(tool) {
+            continue;
+        }
+        let mut cmd = std::process::Command::new(tool);
+        cmd.args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Ok(mut child) = cmd.spawn() {
+            use std::io::Write;
+            let ok = child
+                .stdin
+                .take()
+                .map(|mut si| si.write_all(text.as_bytes()).and_then(|_| si.flush()).is_ok())
+                .unwrap_or(false);
+            let _ = child.wait();
+            if ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn clipboard_get() -> Option<String> {
+    const GETTERS: [(&str, &[&str]); 3] = [
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+        ("wl-paste", &[]),
+    ];
+    for (tool, args) in GETTERS {
+        if !tool_ok(tool) {
+            continue;
+        }
+        let out = std::process::Command::new(tool)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(o) = out {
+            if o.status.success() && !o.stdout.is_empty() {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                while s.ends_with('\n') || s.ends_with('\r') {
+                    s.pop();
+                }
+                return Some(s);
+            }
+        }
+    }
+    None
 }
