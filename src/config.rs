@@ -21,6 +21,7 @@ pub enum Action {
     CloseWindow,
     ToggleMaximize,
     StartMenu,
+    Help,
     SplitVertical,
     SplitHorizontal,
     Minimize,
@@ -98,6 +99,8 @@ fn default_shortcuts() -> Vec<(Key, Action)> {
         (Key::CtrlW, Action::CloseWindow),
         (Key::CtrlF, Action::ToggleMaximize),
         (Key::CtrlD, Action::StartMenu),
+        (Key::CtrlH, Action::Help),
+        (Key::F1, Action::Help),
         (Key::AltV, Action::SplitVertical),
         (Key::AltH, Action::SplitHorizontal),
         (Key::CtrlX, Action::Minimize),
@@ -115,6 +118,7 @@ fn action_for_name(name: &str) -> Option<Action> {
         "close" | "close_window" => Some(Action::CloseWindow),
         "maximize" | "toggle_maximize" => Some(Action::ToggleMaximize),
         "start_menu" | "menu" => Some(Action::StartMenu),
+        "help" => Some(Action::Help),
         "split_vertical" | "split_v" => Some(Action::SplitVertical),
         "split_horizontal" | "split_h" => Some(Action::SplitHorizontal),
         "minimize" => Some(Action::Minimize),
@@ -175,6 +179,7 @@ fn parse_shortcut(spec: &str) -> Option<Key> {
         "enter" => Some(Key::Enter),
         "space" => Some(Key::Char(' ')),
         "escape" | "esc" => Some(Key::Escape),
+        "f1" => Some(Key::F1),
         _ => None,
     }
 }
@@ -190,6 +195,8 @@ mod tests {
         assert_eq!(config.resolve(&Key::CtrlF), Some(Action::ToggleMaximize));
         assert_eq!(config.resolve(&Key::CtrlM), Some(Action::ToggleMouse));
         assert_eq!(config.resolve(&Key::CtrlDelete), Some(Action::Quit));
+        assert_eq!(config.resolve(&Key::CtrlH), Some(Action::Help));
+        assert_eq!(config.resolve(&Key::F1), Some(Action::Help));
         assert_eq!(config.resolve(&Key::Enter), None);
     }
 
@@ -211,6 +218,8 @@ mod tests {
         assert_eq!(parse_shortcut("ctrl+t"), Some(Key::CtrlT));
         assert_eq!(parse_shortcut("ALT+V"), Some(Key::AltV));
         assert_eq!(parse_shortcut("ctrl+m"), Some(Key::CtrlM));
+        assert_eq!(parse_shortcut("ctrl+h"), Some(Key::CtrlH));
+        assert_eq!(parse_shortcut("f1"), Some(Key::F1));
         assert_eq!(parse_shortcut("enter"), Some(Key::Enter));
         assert_eq!(parse_shortcut("space"), Some(Key::Char(' ')));
         assert_eq!(parse_shortcut("ctrl+a"), None);
@@ -221,6 +230,7 @@ mod tests {
     fn action_names_parse() {
         assert_eq!(action_for_name("terminal"), Some(Action::NewTerminal));
         assert_eq!(action_for_name("start_menu"), Some(Action::StartMenu));
+        assert_eq!(action_for_name("help"), Some(Action::Help));
         assert_eq!(action_for_name("split_v"), Some(Action::SplitVertical));
         assert_eq!(action_for_name("nope"), None);
     }

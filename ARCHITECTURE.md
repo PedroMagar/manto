@@ -22,6 +22,7 @@ src/
     pointer.rs         Pointer: movement and cursor drawing
     panel.rs           command panel (blocks, priority, clipping) + tests
     terminal_view.rs   terminal / shell content rendering
+    help_view.rs       help window crib sheet rendering
     render.rs          damage-based frame diff + composition + tests
     screen.rs          frame grid (char + style), selection, StampWriter
   app/                 domain state
@@ -29,6 +30,7 @@ src/
     terminal.rs        TerminalState + REPL helpers + tests
     desktop.rs         Desktop: session state, input handling, tick, draw
   wm/                  window manager actions (snap, split, focus, resize) + tests
+  help.rs              help window content (static usage crib sheet)
   terminal_emulator/   host-independent ANSI/VT emulator (grid, cursor, SGR, alt screen)
     mod.rs             Terminal, Screen, Cell, attributes, parser + tests
   cmd/                 command entries, one-shot runner, built-ins + tests
@@ -69,7 +71,7 @@ Mouse input is a host concern with two fetch paths:
   plus the legacy X10 `ESC[M` form).
 - Windows: `ENABLE_MOUSE_INPUT` stays on and `MOUSE_EVENT_RECORD`s are decoded
   from `ReadConsoleInputW`; the same DEC modes are emitted on stdout so VT hosts
-  (VS Code / Windows Terminal via ConPTY) relay pointer events, and physical
+  (e.g. Windows Terminal via ConPTY) relay pointer events, and physical
   conhost clicks reach the same decoder.
 
 `Desktop.mouse_enabled` (default on, toggled with Ctrl+M, configurable) gates

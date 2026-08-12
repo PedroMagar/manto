@@ -20,7 +20,12 @@ use crate::wm::{self, apply_resize_edit, bring_window_to_front, close_active_win
                 place_pointer_on_terminal_input, push_shell_command, resolve_snap_region,
                 snap_active_window, spawn_interactive_terminal, spawn_terminal_window,
                 split_active_terminal_window, sync_terminal_window_metrics, tab_layout,
-                toggle_active_maximize, toggle_start_menu, topmost_window_at, Mode, ResizeEditState};
+                toggle_active_maximize, toggle_help_window, toggle_start_menu, topmost_window_at,
+                Mode, ResizeEditState};
+
+/// Manhattan distance a left click must travel before it becomes a text
+/// selection drag, keeping plain clicks (and small jitters) free of a box.
+const DRAG_THRESHOLD: u16 = 2;
 
 pub struct Desktop {
     pub mode: Mode,
@@ -59,6 +64,12 @@ pub struct Desktop {
     /// input is ignored entirely and the pointer is driven only by the
     /// keyboard.
     pub mouse_enabled: bool,
+    /// Where the left button was pressed (screen col, row), while a click or
+    /// click-drag is in progress. None when no left button is held.
+    pub mouse_down: Option<(u16, u16)>,
+    /// True once a left click-drag has grown into a screen text selection
+    /// drag; the selection box follows the pointer until the button goes up.
+    pub mouse_selecting: bool,
     /// Set when the user requests quit (Ctrl+Delete).
     pub quit: bool,
 }
@@ -148,6 +159,8 @@ impl Desktop {
             full_redraw: true,
             last_mouse: None,
             mouse_enabled: true,
+            mouse_down: None,
+            mouse_selecting: false,
             quit: false,
         }
     }
@@ -375,6 +388,15 @@ impl Desktop {
             return handled;
         }
 
+        // Help window open: Esc/F1/Ctrl+H close it, arrows/page keys scroll
+        // the crib sheet. Other keys fall through to the normal handler.
+        if matches!(self.mode, Mode::Normal)
+            && let Some(help_idx) = self.help_idx()
+            && let Some(handled) = self.key_help(help_idx, &key)
+        {
+            return handled;
+        }
+
         let mut mode_changed = false;
 
         match key {
@@ -454,6 +476,10 @@ impl Desktop {
                 // Clear the free selection without leaving normal mode.
                 self.sel = None;
                 self.sel_pos = None;
+                // Also release any drag state stuck by a missed button-up, so
+                // a future selection starts from a fresh press.
+                self.mouse_down = None;
+                self.mouse_selecting = false;
                 mode_changed = true;
             }
             Key::Enter if self.sel.is_some() => {
@@ -576,6 +602,19 @@ impl Desktop {
                 if let Some(menu_idx) = self.applications.iter().position(|a| a.on_desktop(self.current_desktop) && a.is_menu) {
                     if top_idx != menu_idx {
                         self.applications.remove(menu_idx);
+                        self.tab_scroll = self.tab_scroll
+                            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                        mode_changed = true;
+                        skip = true;
+                    }
+                }
+                // The help window closes when the click lands outside it.
+                // `topmost_window_at` is recomputed so indices stay valid
+                // after the menu removal above.
+                if let Some(help_idx) = self.help_idx() {
+                    let clicked = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y);
+                    if clicked != Some(help_idx) {
+                        self.applications.remove(help_idx);
                         self.tab_scroll = self.tab_scroll
                             .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
                         mode_changed = true;
@@ -738,6 +777,13 @@ impl Desktop {
                     false
                 }
             }
+            Action::Help => toggle_help_window(
+                &mut self.applications,
+                self.current_desktop,
+                self.last_size.0,
+                self.last_size.1,
+                &mut self.tab_scroll,
+            ),
             Action::SplitVertical => {
                 if let Some(app_idx) = split_active_terminal_window(
                     &mut self.applications,
@@ -810,6 +856,42 @@ impl Desktop {
 
         match ev.kind {
             MouseAction::Move | MouseAction::Drag => {
+                // A hover move means no button is held. If a selection drag is
+                // still flagged, the button-up was missed (e.g. released
+                // outside the terminal window or dropped by the host):
+                // finalize the drag now so the selection can never stay wired
+                // to the pointer. Plain moves never extend a selection; only
+                // real drags do.
+                if ev.kind == MouseAction::Move && self.mouse_selecting {
+                    self.mouse_down = None;
+                    self.mouse_selecting = false;
+                    return true;
+                }
+                // A left drag in Normal mode grows into a screen text
+                // selection once the pointer leaves the cell where the button
+                // was pressed. Window moves/resizes and focus modes (Typing /
+                // TerminalFocus) keep their own handling, so the drag never
+                // hijacks them.
+                if ev.kind == MouseAction::Drag
+                    && ev.button == MouseButton::Left
+                    && !self.mouse_selecting
+                    && let Some((down_x, down_y)) = self.mouse_down
+                    && matches!(self.mode, Mode::Normal)
+                {
+                    let dist = sx.abs_diff(down_x) + sy.abs_diff(down_y);
+                    if dist >= DRAG_THRESHOLD {
+                        self.mouse_selecting = true;
+                    }
+                }
+                if self.mouse_selecting {
+                    let (down_x, down_y) = self.mouse_down.unwrap_or((sx, sy));
+                    self.sel_pos = Some((sx, sy));
+                    self.sel = Some(crate::ui::screen::BoxSelect {
+                        anchor: (down_y as usize, down_x as usize),
+                        extent: (sy as usize, sx as usize),
+                    });
+                    return true;
+                }
                 // Hovering over a start-menu entry highlights it.
                 if let Some(menu_idx) = self.start_menu_idx()
                     && let Some(sel) = self.menu_item_under_pointer(menu_idx)
@@ -820,6 +902,14 @@ impl Desktop {
                 moved
             }
             MouseAction::Release => {
+                // A finished selection drag keeps the box; the pointer state
+                // is cleared so a subsequent motion is just a hover.
+                let was_selecting = self.mouse_selecting;
+                self.mouse_down = None;
+                self.mouse_selecting = false;
+                if was_selecting {
+                    return true;
+                }
                 let was_dragging = matches!(self.mode, Mode::Moving { .. } | Mode::Resizing { .. });
                 if was_dragging {
                     if let Mode::Resizing { app_idx, .. } = &self.mode {
@@ -839,14 +929,34 @@ impl Desktop {
             MouseAction::Press => match ev.button {
                 MouseButton::WheelUp => self.mouse_scroll(true),
                 MouseButton::WheelDown => self.mouse_scroll(false),
-                MouseButton::Left => self.mouse_left_press(),
-                MouseButton::Right => self.mouse_right_press(),
-                MouseButton::Middle => false,
+                MouseButton::Left => {
+                    self.mouse_down = Some((sx, sy));
+                    self.mouse_selecting = false;
+                    self.mouse_left_press()
+                }
+                MouseButton::Right => {
+                    self.mouse_down = None;
+                    self.mouse_selecting = false;
+                    self.mouse_right_press()
+                }
+                MouseButton::Middle => {
+                    self.mouse_down = None;
+                    self.mouse_selecting = false;
+                    false
+                }
             },
         }
     }
 
     fn mouse_left_press(&mut self) -> bool {
+        // A fresh press starts a new interaction: drop any selection box left
+        // over from a previous copy/shift-arrow selection. A click-drag will
+        // rebuild it below (the drag keeps the box on release).
+        self.sel = None;
+        self.sel_pos = None;
+        // A press anywhere but on the help window dismisses it.
+        self.dismiss_help_on_outside_press();
+
         // Clicking a start-menu entry selects and launches it.
         if let Some(menu_idx) = self.start_menu_idx()
             && let Some(sel) = self.menu_item_under_pointer(menu_idx)
@@ -893,8 +1003,9 @@ impl Desktop {
         }
     }
 
-    /// Wheel scrolling: the minimized-window rail (right edge), the terminal
-    /// under the pointer, or the dock command panel.
+    /// Wheel scrolling: the minimized-window rail (right edge), the help
+    /// window under the pointer, the terminal under the pointer, or the dock
+    /// command panel.
     fn mouse_scroll(&mut self, up: bool) -> bool {
         let sb_x = self.last_size.0.saturating_sub(1);
         let sb_top = 1u16;
@@ -916,6 +1027,29 @@ impl Desktop {
                 };
                 return true;
             }
+        }
+
+        // Help window under the pointer: scroll its crib sheet.
+        if let Some(help_idx) = self.help_idx()
+            && let Some(win) = self.applications.get(help_idx).and_then(|a| a.window())
+            && self.pointer.x > win.position_x
+            && self.pointer.x < win.position_x + win.width - 1
+            && self.pointer.y > win.position_y
+            && self.pointer.y < win.position_y + win.height - 1
+        {
+            let inner_w = win.width.saturating_sub(2) as usize;
+            let inner_h = win.height.saturating_sub(2) as usize;
+            let max_scroll = self.applications[help_idx].help.as_ref()
+                .map(|help| crate::ui::help_max_scroll(&help.lines, inner_w.max(1), inner_h.max(1)))
+                .unwrap_or(0);
+            if let Some(help) = self.applications.get_mut(help_idx).and_then(|a| a.help.as_mut()) {
+                help.scroll = if up {
+                    help.scroll.saturating_add(1)
+                } else {
+                    help.scroll.saturating_sub(1)
+                }.min(max_scroll);
+            }
+            return true;
         }
 
         // Terminal under the pointer: scroll its scrollback.
@@ -965,7 +1099,9 @@ impl Desktop {
             apps: Vec::new(),
         };
         for app in &self.applications {
-            if app.is_menu { continue; }
+            if app.is_menu || app.help.is_some() {
+                continue;
+            }
             let Some(terminal) = app.terminal.as_ref() else { continue };
             let Some(win) = app.window() else { continue };
             session.apps.push(crate::session::SavedApp {
@@ -986,6 +1122,8 @@ impl Desktop {
         match key {
             Key::Escape | Key::End => {
                 self.mode = Mode::Normal;
+                self.mouse_down = None;
+                self.mouse_selecting = false;
                 mode_changed = true;
             }
             Key::CtrlEnter => {
@@ -1240,6 +1378,8 @@ impl Desktop {
         match key {
             Key::Escape | Key::End => {
                 self.mode = Mode::Normal;
+                self.mouse_down = None;
+                self.mouse_selecting = false;
                 mode_changed = true;
             }
             Key::Enter => {
@@ -1410,6 +1550,8 @@ impl Desktop {
         match key {
             Key::Escape | Key::End => {
                 self.mode = Mode::Normal;
+                self.mouse_down = None;
+                self.mouse_selecting = false;
                 true
             }
             Key::PageUp | Key::PageDown => {
@@ -1596,6 +1738,79 @@ impl Desktop {
         })
     }
 
+    /// Index of the open help window on the current desktop.
+    fn help_idx(&self) -> Option<usize> {
+        self.applications.iter().rposition(|app| {
+            app.on_desktop(self.current_desktop) && app.help.is_some()
+        })
+    }
+
+    /// Close the open help window (it is re-created on the next toggle).
+    fn close_help(&mut self, help_idx: usize) {
+        self.applications.remove(help_idx);
+        self.tab_scroll = self.tab_scroll
+            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+    }
+
+    /// Close the open help window when a left press lands anywhere but on it
+    /// (windows, desktop, dock, tabs, scrollbars...).
+    fn dismiss_help_on_outside_press(&mut self) {
+        let Some(help_idx) = self.help_idx() else { return };
+        let inside = self.applications.get(help_idx).and_then(|a| a.window()).map_or(false, |win| {
+            self.pointer.x >= win.position_x
+                && self.pointer.x <= win.position_x + win.width - 1
+                && self.pointer.y >= win.position_y
+                && self.pointer.y <= win.position_y + win.height - 1
+        });
+        if !inside {
+            self.close_help(help_idx);
+        }
+    }
+
+    /// Keyboard handling while the help window is open (Normal mode only):
+    /// arrows/page keys scroll the crib sheet and Esc (or the F1/Ctrl+H
+    /// toggle) closes it. Returns None when the key is not a help key and
+    /// should fall through to the normal handler.
+    fn key_help(&mut self, help_idx: usize, key: &Key) -> Option<bool> {
+        match key {
+            Key::Escape | Key::End => {
+                self.close_help(help_idx);
+                Some(true)
+            }
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                let (inner_w, inner_h) = self.applications.get(help_idx)
+                    .and_then(|app| app.window())
+                    .map_or((80, 20), |win| {
+                        (win.width.saturating_sub(2) as usize,
+                         win.height.saturating_sub(2) as usize)
+                    });
+                let max_scroll = self.applications.get(help_idx)
+                    .map(|app| app.help.as_ref())
+                    .flatten()
+                    .map_or(0, |help| {
+                        crate::ui::help_max_scroll(
+                            &help.lines,
+                            inner_w.max(1),
+                            inner_h.max(1),
+                        )
+                    });
+                if let Some(help) = self.applications.get_mut(help_idx).and_then(|app| app.help.as_mut()) {
+                    match key {
+                        Key::Up | Key::PageUp => {
+                            help.scroll = help.scroll.saturating_sub(if matches!(key, Key::PageUp) { inner_h } else { 1 });
+                        }
+                        _ => {
+                            help.scroll = (help.scroll + if matches!(key, Key::PageDown) { inner_h } else { 1 })
+                                .min(max_scroll);
+                        }
+                    }
+                }
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
     /// Land the pointer on the first menu entry (the "▶" of the initial
     /// selection) when the start menu opens.
     fn park_pointer_on_start_menu(&mut self) {
@@ -1613,10 +1828,12 @@ impl Desktop {
     /// to the normal handler.
     fn key_menu(&mut self, menu_idx: usize, key: &Key) -> Option<bool> {
         // Esc with a free screen selection active clears it first, exactly
-        // like normal mode.
+        // like normal mode, and drops any stuck drag state.
         if matches!(key, Key::Escape) && self.sel.is_some() {
             self.sel = None;
             self.sel_pos = None;
+            self.mouse_down = None;
+            self.mouse_selecting = false;
             return Some(true);
         }
 
@@ -1790,6 +2007,313 @@ impl ModeKind {
             Mode::Resizing { .. } => ModeKind::Resizing,
             Mode::TerminalFocus { .. } => ModeKind::TerminalFocus,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::screen::ScreenGrid;
+    use crate::input::History;
+
+    fn test_desktop(w: u16, h: u16) -> Desktop {
+        Desktop {
+            mode: Mode::Normal,
+            scroll_offset: 0,
+            tab_scroll: 0,
+            panel_scroll: 0,
+            current_desktop: 1,
+            next_terminal_id: 1,
+            last_space_time: None,
+            current_path: ".".to_string(),
+            cmd_input: String::new(),
+            cmd_cursor: 0,
+            history_index: None,
+            history_draft: None,
+            last_size: (w, h),
+            pointer: Pointer::new(12, h - 2),
+            applications: Vec::new(),
+            history: History::new(),
+            commands: Vec::new(),
+            screen: ScreenGrid::new(w, h),
+            sel: None,
+            sel_pos: None,
+            clipboard: String::new(),
+            config: Config::load(),
+            full_redraw: true,
+            last_mouse: None,
+            mouse_enabled: true,
+            mouse_down: None,
+            mouse_selecting: false,
+            quit: false,
+        }
+    }
+
+    fn press(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Press, button: MouseButton::Left,
+            shift: false, ctrl: false, alt: false,
+        })
+    }
+    fn release(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Release, button: MouseButton::Left,
+            shift: false, ctrl: false, alt: false,
+        })
+    }
+    fn drag(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Drag, button: MouseButton::Left,
+            shift: false, ctrl: false, alt: false,
+        })
+    }
+    fn move_to(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Move, button: MouseButton::Left,
+            shift: false, ctrl: false, alt: false,
+        })
+    }
+
+    #[test]
+    fn click_dock_input_stays_typing_after_release() {
+        let mut d = test_desktop(80, 24);
+        // Click the dock ".> " input (row h-2 = 22; sy = ev.y-1).
+        d.handle_key(press(13, 23));
+        assert!(matches!(d.mode, Mode::Typing), "press should enter typing, got {:?}", d.mode);
+        d.handle_key(release(13, 23));
+        assert!(matches!(d.mode, Mode::Typing), "release must keep typing, got {:?}", d.mode);
+    }
+
+    #[test]
+    fn click_terminal_input_keeps_terminal_focus() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Terminal input row: win.position_y + win.height - 2 = 5 + 20 - 2 = 23 -> ev.y = 24.
+        // Column must be > win.position_x (10) and < position_x + width - 1 (59) -> ev.x = 20.
+        d.handle_key(press(20, 24));
+        assert!(matches!(d.mode, Mode::TerminalFocus { .. }), "press should focus terminal, got {:?}", d.mode);
+        d.handle_key(drag(22, 24));
+        d.handle_key(release(22, 24));
+        assert!(matches!(d.mode, Mode::TerminalFocus { .. }), "release must keep focus, got {:?}", d.mode);
+    }
+
+    #[test]
+    fn drag_over_terminal_body_selects_screen_box() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Press on the terminal body (row 14 / y=15), drag to (29,19), release.
+        d.handle_key(press(20, 15));
+        assert!(matches!(d.mode, Mode::Normal), "body click stays normal, got {:?}", d.mode);
+        d.handle_key(drag(30, 20));
+        let sel = d.sel.expect("drag should open a screen selection");
+        assert_eq!(sel.anchor, (14, 19), "anchor is the press (row, col)");
+        assert_eq!(sel.extent, (19, 29), "extent follows the pointer");
+        assert!(d.mouse_selecting, "drag should be flagged as selecting");
+        d.handle_key(release(30, 20));
+        assert!(d.sel.is_some(), "release keeps the selection box");
+        assert!(!d.mouse_selecting, "release clears the drag state");
+    }
+
+    #[test]
+    fn click_drag_threshold_ignores_small_jitter() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        d.handle_key(press(20, 15));
+        // A one-cell jitter is below the threshold: no selection box.
+        d.handle_key(drag(21, 15));
+        assert!(d.sel.is_none(), "jitter must not open a selection");
+        assert!(!d.mouse_selecting);
+    }
+
+    #[test]
+    fn drag_on_titlebar_moves_not_selects() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Press the title bar row (y = 5 -> ev.y = 6).
+        d.handle_key(press(20, 6));
+        assert!(matches!(d.mode, Mode::Moving { .. }), "title press enters Moving, got {:?}", d.mode);
+        d.handle_key(drag(30, 6));
+        assert!(d.sel.is_none(), "a window move drag must not select text");
+        // The window follows the pointer in step_input (Moving mode); the drag
+        // must keep the mode so that happens.
+        assert!(matches!(d.mode, Mode::Moving { .. }), "drag keeps moving the window");
+    }
+
+    #[test]
+    fn plain_click_clears_a_stale_selection() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Set up a leftover selection, then a plain click clears it.
+        d.sel = Some(crate::ui::screen::BoxSelect { anchor: (2, 2), extent: (4, 4) });
+        d.sel_pos = Some((2, 2));
+        d.handle_key(press(20, 15));
+        d.handle_key(release(20, 15));
+        assert!(d.sel.is_none(), "a plain click drops the old selection");
+    }
+
+    #[test]
+    fn missed_release_is_finalized_by_hover_move() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Start a selection drag; the button-up never arrives.
+        d.handle_key(press(20, 15));
+        d.handle_key(drag(30, 20));
+        assert!(d.mouse_selecting, "drag is selecting");
+        let sel_before = d.sel.unwrap();
+        // A hover move (no button held) must finalize the stuck drag...
+        d.handle_key(move_to(40, 25));
+        assert!(!d.mouse_selecting, "hover move ends the stuck drag");
+        assert!(d.mouse_down.is_none(), "hover move drops the press anchor");
+        assert_eq!(d.sel.unwrap(), sel_before, "the box is kept, not extended");
+        // ... and further hover moves stay inert, so the selection can never
+        // keep chasing the pointer after the button is gone.
+        d.handle_key(move_to(50, 30));
+        d.handle_key(move_to(60, 35));
+        assert_eq!(d.sel.unwrap(), sel_before, "hover motion must never extend the box");
+    }
+
+    #[test]
+    fn escape_releases_stuck_drag_state() {
+        use crate::app::Application;
+        use crate::ui::window::Window;
+        let mut d = test_desktop(120, 40);
+        let app = Application::terminal_window(
+            "T", Window::new(10, 5, 50, 20, 0),
+            ".".to_string(), Vec::new(),
+        );
+        d.applications.push(app);
+        // Simulate a drag stuck with no release.
+        d.handle_key(press(20, 15));
+        d.handle_key(drag(30, 20));
+        assert!(d.mouse_selecting);
+        // Esc clears the box and the drag state; later hover moves are inert
+        // even though no release ever arrived.
+        d.handle_key(Key::Escape);
+        assert!(d.sel.is_none());
+        assert!(!d.mouse_selecting);
+        assert!(d.mouse_down.is_none());
+        d.handle_key(move_to(40, 25));
+        d.handle_key(drag(41, 26)); // stray drag without a press: must not select
+        assert!(d.sel.is_none(), "a stray drag after Esc must not re-open a selection");
+    }
+
+    #[test]
+    fn help_toggles_with_action_and_esc() {
+        let mut d = test_desktop(120, 40);
+        assert!(d.help_idx().is_none(), "no help window initially");
+        assert!(d.run_action(Action::Help), "opening the help redraws");
+        assert!(d.help_idx().is_some(), "action opens the help window");
+        // The shortcut again closes it (toggle).
+        assert!(d.run_action(Action::Help));
+        assert!(d.help_idx().is_none(), "second toggle closes the help");
+        // Reopen; Esc in Normal mode closes it.
+        d.run_action(Action::Help);
+        d.handle_key(Key::Escape);
+        assert!(d.help_idx().is_none(), "Esc closes the help window");
+    }
+
+    #[test]
+    fn help_scrolls_with_arrows_pages_and_wheel() {
+        let mut d = test_desktop(120, 40);
+        d.run_action(Action::Help);
+        let help_idx = d.help_idx().unwrap();
+        let scroll = |d: &Desktop| d.applications[help_idx].help.as_ref().unwrap().scroll;
+        let inner_h = d.applications[help_idx].window().unwrap().height.saturating_sub(2) as usize;
+
+        assert_eq!(scroll(&d), 0);
+        d.handle_key(Key::Down);
+        assert_eq!(scroll(&d), 1);
+        d.handle_key(Key::PageDown);
+        assert_eq!(scroll(&d), 1 + inner_h);
+        d.handle_key(Key::Up);
+        assert_eq!(scroll(&d), inner_h);
+        // Scrolling past the end clamps at the last page.
+        for _ in 0..1000 {
+            d.handle_key(Key::PageDown);
+        }
+        let max_scroll = crate::ui::help_max_scroll(
+            &d.applications[help_idx].help.as_ref().unwrap().lines,
+            d.applications[help_idx].window().unwrap().width as usize - 2,
+            inner_h,
+        );
+        assert_eq!(scroll(&d), max_scroll, "PageDown at the end clamps to the last page");
+        d.handle_key(Key::PageUp);
+        assert_eq!(scroll(&d), max_scroll.saturating_sub(inner_h));
+        // Wheel over the help window scrolls it (up = older content).
+        d.handle_key(move_to(d.applications[help_idx].window().unwrap().position_x + 10, d.applications[help_idx].window().unwrap().position_y + 5));
+        let (wx, wy) = (d.pointer.x + 1, d.pointer.y + 1);
+        let before = scroll(&d);
+        d.handle_key(wheel_down_at(wx, wy));
+        assert_eq!(scroll(&d), before.saturating_sub(1));
+        d.handle_key(wheel_up_at(wx, wy));
+        assert_eq!(scroll(&d), before);
+    }
+
+    #[test]
+    fn help_closes_when_clicking_outside() {
+        let mut d = test_desktop(120, 40);
+        d.run_action(Action::Help);
+        let help_idx = d.help_idx().unwrap();
+        let (x0, y0, w, h) = {
+            let win = d.applications[help_idx].window().unwrap();
+            (win.position_x, win.position_y, win.width, win.height)
+        };
+        // A click cornered far away from the window closes it.
+        let x = x0.saturating_sub(3).max(2) as u16;
+        let y = y0.saturating_sub(3).max(2) as u16;
+        d.handle_key(press(x + 1, y + 1));
+        d.handle_key(release(x + 1, y + 1));
+        assert!(d.help_idx().is_none(), "a click outside the help closes it");
+        let _ = (x0, w, h);
+    }
+
+    fn wheel_up_at(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Press, button: MouseButton::WheelUp,
+            shift: false, ctrl: false, alt: false,
+        })
+    }
+    fn wheel_down_at(x: u16, y: u16) -> Key {
+        Key::Mouse(MouseEvent {
+            x, y, kind: MouseAction::Press, button: MouseButton::WheelDown,
+            shift: false, ctrl: false, alt: false,
+        })
     }
 }
 

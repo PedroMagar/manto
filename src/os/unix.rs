@@ -169,6 +169,7 @@ pub fn read_key() -> Key {
                                                 b"3;5" => return Key::CtrlDelete,
                                                 b"5" => return Key::PageUp,
                                                 b"6" => return Key::PageDown,
+                                                b"11" => return Key::F1,
                                                 _ => continue,
                                             }
                                         }
@@ -197,6 +198,15 @@ pub fn read_key() -> Key {
                             b'h' | b'H' => return Key::AltH,
                             b'r' | b'R' => return Key::AltR,
                             b'v' | b'V' => return Key::AltV,
+                            b'O' => {
+                                // SS3 function keys: ESC O P (F1), ...
+                                let mut last = [0u8; 1];
+                                std::io::stdin().read_exact(&mut last).unwrap_or_default();
+                                match last[0] {
+                                    b'P' => return Key::F1,
+                                    _ => continue,
+                                }
+                            }
                             _ => continue,
                         }
                     }

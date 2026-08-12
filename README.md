@@ -28,7 +28,13 @@ Mouse is **enabled by default** and can be toggled with **`Ctrl+M`** (or
   desktop buttons highlights the action points; moving inside a window just
   moves the pointer.
 - **Left click** activates what's under the pointer (focus, restore from tab,
-  switch desktop, toggle Start, enter a terminal, scroll a bar).
+  switch desktop, toggle Start, enter a terminal, scroll a bar). Clicking the
+  dock or terminal *`.> `* input box enters typing/focus mode and keeps it
+  until you `Esc`/`End` or click elsewhere.
+- **Left click-and-drag** over any window or desktop text starts a screen text
+  selection that follows the pointer and stays after you release
+  (`Enter`/`Ctrl+C` copies, `Esc` clears). A plain click clears any stale
+  selection. Dragging the chrome still moves/resizes windows and scroll pages.
 - **Drag** a title bar to move a window and the bottom-right corner to resize.
 - **Wheel** scrolls the terminal under the pointer, the dock panel or the
   minimized-window rail.
@@ -36,9 +42,9 @@ Mouse is **enabled by default** and can be toggled with **`Ctrl+M`** (or
 - **Right click** focuses (raises) the window under the pointer.
 - Inside an **interactive terminal**, pointer events are forwarded to the app
   (SGR); clicking anywhere in the app body enters it, clicking outside leaves
-  it.
-- Text selection still uses `Shift+arrows` (free-screen selection) and
-  `Enter`/`Ctrl+C` copies; `Ctrl+M` is handy when a console app grabs clicks
+  it. Click-drag there goes to the app (its own selection), not Manto's.
+- Free screen selection is also available with `Shift+arrows`; `Enter`/`Ctrl+C`
+  copies the current box. `Ctrl+M` is handy when a console app grabs clicks
   you want for yourself.
 
 Note: **`Ctrl+M` is Windows-only** — the Unix console encodes Ctrl+M the same
@@ -59,6 +65,10 @@ under `"shortcuts"` (e.g. `{ "terminal": "ctrl+t", "mouse": "ctrl+m" }`).
 - `Ctrl+P` *configurable*: focus the previous visible window.
 - `Ctrl+X` *configurable*: minimize the active window.
 - `Ctrl+D` *configurable*: open or close the Start menu.
+- `Ctrl+H` / `F1` *configurable*: open or close the help window, a crib sheet
+  with all usage tips and shortcuts (scroll with arrows/Page keys or the
+  wheel; `Esc` or another `F1`/`Ctrl+H` closes). `Ctrl+H` is Windows-only —
+  the Unix console encodes it as Backspace, so there use `F1`.
 - `Ctrl+M` *configurable*: toggle mouse input (default on).
 - `Ctrl+1`, `Ctrl+2`, `Ctrl+3`, `Ctrl+4`: move the active window to desktop 1-4 and follow it.
 - `1`, `2`, `3`, `4`: switch to desktop 1-4.
@@ -160,9 +170,9 @@ that way automatically. Inside:
 
 - `theme`: 0 (none), 1 (top border) or 2 (full border).
 - `shortcuts`: remap desktop actions — `terminal`, `close`, `maximize`,
-  `start_menu`, `split_vertical`, `split_horizontal`, `minimize`, `focus_next`,
-  `focus_prev`, `resize`, `mouse`, `quit` (values like `"ctrl+t"` / `"alt+v"` /
-  `"enter"`).
+  `start_menu`, `help`, `split_vertical`, `split_horizontal`, `minimize`,
+  `focus_next`, `focus_prev`, `resize`, `mouse`, `quit` (values like
+  `"ctrl+t"` / `"alt+v"` / `"f1"` / `"enter"`).
 
 ## Persistence
 

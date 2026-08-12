@@ -6,6 +6,7 @@
 mod app;
 mod cmd;
 mod config;
+mod help;
 mod input;
 mod json;
 mod menu;

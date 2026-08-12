@@ -11,6 +11,8 @@ mod panel;
 mod render;
 mod terminal_view;
 
+mod help_view;
+pub use help_view::{draw_help_content, help_max_scroll};
 pub use menu_view::draw_menu_content;
 pub use panel::draw_command_panel;
 pub use render::{compute_render_state, render};

@@ -68,6 +68,7 @@ pub enum Key {
     Escape,
     End,
     Home,
+    F1,
     PageUp,
     PageDown,
     Ctrl1,

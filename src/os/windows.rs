@@ -73,6 +73,8 @@ unsafe extern "system" {
     fn GetConsoleScreenBufferInfo(h: Handle, info: *mut ScreenBufInfo) -> Bool;
     fn WaitForSingleObject(h: Handle, ms: Dword)   -> Dword;
     fn ReadConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
+    #[cfg(test)]
+    fn WriteConsoleInputW(h: Handle, buf: *const InputRecord, len: Dword, read: *mut Dword) -> Bool;
     fn PeekConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
     fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut Dword) -> Bool;
     fn GetKeyState(n_virt_key: i32) -> i16;
@@ -202,7 +204,7 @@ pub fn enable_raw_mode() {
     }
 
     // Ask the host terminal to report pointer events: without these DEC modes
-    // a VT host (VS Code / Windows Terminal) never sends mouse, so only the
+    // a VT host (e.g. Windows Terminal) never sends mouse, so only the
     // physical-console path (real conhost window clicks) would generate
     // MOUSE_EVENT_RECORDs. With VT processing on, these are interpreted by
     // the terminal and ConPTY relays the reports back as INPUT_RECORDs.
@@ -363,6 +365,7 @@ pub fn read_key() -> Key {
                 0x22 => return Key::PageDown,
                 0x23 => return Key::End,
                 0x24 => return Key::Home,
+                0x70 => return Key::F1,
                 0x26 => return if shift { Key::ShiftUp } else { Key::Up },
                 0x28 => return if shift { Key::ShiftDown } else { Key::Down },
                 0x25 => return if shift { Key::ShiftLeft } else { Key::Left },
@@ -370,10 +373,171 @@ pub fn read_key() -> Key {
                 _ => {}
             }
 
-            if let Some(c) = char::from_u32(ch as u32) {
-                if !c.is_control() { return Key::Char(c); }
+            // VT hosts (e.g. Windows Terminal via ConPTY) deliver key
+            // sequences as character records instead of VK records: reassemble
+            // ESC O P (F1), ESC[11~ (F1), arrows, etc. from those characters.
+            let pending = VT_PENDING.swap(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
+            if pending != VT_PENDING_NONE {
+                if let Some(key) = vt_feed(pending) {
+                    return key;
+                }
+            }
+            if let Some(key) = vt_feed(ch) {
+                return key;
             }
         }
+    }
+}
+
+/// VT input reassembly state: characters that arrive as separate
+/// `KEY_EVENT_RECORD`s while forming an ESC sequence (ConPTY hosts).
+/// `VT_PENDING` holds a character that followed a lone ESC and is fed
+/// back on the next read (0xFFFF = empty).
+static VT_SEQ: [std::sync::atomic::AtomicU16; 24] =
+    [const { std::sync::atomic::AtomicU16::new(0) }; 24];
+static VT_SEQ_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static VT_PENDING: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0xFFFF);
+const VT_PENDING_NONE: u16 = 0xFFFF;
+
+// Character constants for the VT pattern matches below.
+const K_ESC: u16 = 0x1B;
+const K_LBRACKET: u16 = 0x5B; // '['
+const K_O: u16 = 0x4F;        // 'O'
+const K_TILDE: u16 = 0x7E;    // '~'
+const K_A: u16 = 0x41;        // 'A'
+const K_B: u16 = 0x42;        // 'B'
+const K_C: u16 = 0x43;        // 'C'
+const K_D: u16 = 0x44;        // 'D'
+const K_H: u16 = 0x48;        // 'H'
+const K_F: u16 = 0x46;        // 'F'
+const K_P: u16 = 0x50;        // 'P'
+const K_ZERO: u16 = 0x30;     // '0'
+const K_NINE: u16 = 0x39;     // '9'
+const K_SEMICOLON: u16 = 0x3B; // ';'
+
+/// Feed one character from the input stream into the VT key reassembler.
+/// Returns the decoded `Key` when the character completes a sequence (or is
+/// plain text); None while a sequence is still being accumulated.
+fn vt_feed(ch: u16) -> Option<Key> {
+    let len = VT_SEQ_LEN.load(std::sync::atomic::Ordering::Relaxed);
+    if len == 0 {
+        if ch == K_ESC {
+            VT_SEQ[0].store(ch, std::sync::atomic::Ordering::Relaxed);
+            VT_SEQ_LEN.store(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+        VT_PENDING.store(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
+        return match ch {
+            0x08 => Some(Key::Backspace),
+            0x0D => Some(Key::Enter),
+            0x09 => Some(Key::Tab),
+            0x03 => Some(Key::CtrlC),
+            0x04 => Some(Key::CtrlD),
+            0x0C => Some(Key::CtrlL),
+            0x1A => Some(Key::CtrlZ),
+            c if c < 0x20 => None,
+            c => char::from_u32(c as u32).map(Key::Char),
+        };
+    }
+
+    if VT_SEQ[0].load(std::sync::atomic::Ordering::Relaxed) != K_ESC {
+        VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+
+    // ESC followed by a printable, but not a sequence intro: the ESC was
+    // a bare Escape; the character is fed back on the next read.
+    if len == 1 && ch != K_LBRACKET && ch != K_O {
+        VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        VT_PENDING.store(ch, std::sync::atomic::Ordering::Relaxed);
+        return Some(Key::Escape);
+    }
+
+    // ESC '[' / ESC 'O': append the intro and wait for the rest.
+    if len == 1 {
+        VT_SEQ[1].store(ch, std::sync::atomic::Ordering::Relaxed);
+        VT_SEQ_LEN.store(2, std::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+
+    // ESC O <final>: SS3 function/navigation keys.
+    if len == 2 && VT_SEQ[1].load(std::sync::atomic::Ordering::Relaxed) == K_O {
+        VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        return match ch {
+            K_P => Some(Key::F1),
+            K_A => Some(Key::Up),
+            K_B => Some(Key::Down),
+            K_C => Some(Key::Right),
+            K_D => Some(Key::Left),
+            _ => {
+                VT_PENDING.store(ch, std::sync::atomic::Ordering::Relaxed);
+                Some(Key::Escape)
+            }
+        };
+    }
+
+    // ESC [ <params> <final>.
+    if VT_SEQ[1].load(std::sync::atomic::Ordering::Relaxed) == K_LBRACKET {
+        let is_final = (0x40..=0x7E).contains(&ch);
+        if len == 2 && !is_final && !((K_ZERO..=K_NINE).contains(&ch) || ch == K_SEMICOLON) {
+            VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+            VT_PENDING.store(ch, std::sync::atomic::Ordering::Relaxed);
+            return Some(Key::Escape);
+        }
+        if len < VT_SEQ.len() {
+            VT_SEQ[len].store(ch, std::sync::atomic::Ordering::Relaxed);
+            VT_SEQ_LEN.store(len + 1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !is_final {
+            return None; // still accumulating parameters
+        }
+        let key = vt_finish_csi(len + 1);
+        VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        return key;
+    }
+
+    VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+    None
+}
+
+/// Decode a completed `ESC [ ...` sequence (params in `VT_SEQ[2..]`).
+fn vt_finish_csi(len: usize) -> Option<Key> {
+    if len < 3 {
+        return None;
+    }
+    let final_byte = VT_SEQ[len - 1].load(std::sync::atomic::Ordering::Relaxed);
+    let mut params = String::new();
+    for i in 2..len - 1 {
+        if let Some(c) = char::from_u32(VT_SEQ[i].load(std::sync::atomic::Ordering::Relaxed) as u32) {
+            params.push(c);
+        }
+    }
+    match final_byte {
+        K_TILDE => match params.as_str() {
+            "11" => Some(Key::F1),
+            "3" => Some(Key::Delete),
+            "3;5" => Some(Key::CtrlDelete),
+            "5" => Some(Key::PageUp),
+            "6" => Some(Key::PageDown),
+            _ => None,
+        },
+        K_A => Some(arrow_with_mods(&params, Key::Up, Key::ShiftUp, Key::AltUp)),
+        K_B => Some(arrow_with_mods(&params, Key::Down, Key::ShiftDown, Key::AltDown)),
+        K_C => Some(arrow_with_mods(&params, Key::Right, Key::ShiftRight, Key::AltRight)),
+        K_D => Some(arrow_with_mods(&params, Key::Left, Key::ShiftLeft, Key::AltLeft)),
+        K_H => Some(Key::Home),
+        K_F => Some(Key::End),
+        _ => None,
+    }
+}
+
+/// Pick the arrow key variant from the CSI modifier parameter: plain,
+/// Shift ("1;2") or Alt ("1;3").
+fn arrow_with_mods(params: &str, plain: Key, shift: Key, alt: Key) -> Key {
+    match params {
+        "1;2" => shift,
+        "1;3" => alt,
+        _ => plain,
     }
 }
 
@@ -470,6 +634,60 @@ mod tests {
         InputRecord { event_type: MOUSE_EVENT_TYPE, _pad: 0, event }
     }
 
+    /// A KEY_EVENT_RECORD carrying one character (ConPTY-style VT input).
+    fn char_record(ch: u16) -> InputRecord {
+        let mut event = [0u8; 16];
+        event[0..4].copy_from_slice(&1i32.to_ne_bytes()); // bKeyDown = 1
+        event[6..8].copy_from_slice(&0u16.to_ne_bytes()); // wVK = 0
+        event[10..12].copy_from_slice(&ch.to_ne_bytes()); // uChar
+        event[12..16].copy_from_slice(&0u32.to_ne_bytes()); // dwControlKeyState
+        InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event }
+    }
+
+    fn vt_seqs() -> Vec<(Vec<u16>, Key)> {
+        vec![
+            (vec![0x1B, b'O' as u16, b'P' as u16], Key::F1),
+            (vec![0x1B, b'[' as u16, b'1' as u16, b'1' as u16, b'~' as u16], Key::F1),
+            (vec![0x1B, b'[' as u16, b'A' as u16], Key::Up),
+            (vec![0x1B, b'[' as u16, b'1' as u16, b';' as u16, b'2' as u16, b'A' as u16], Key::ShiftUp),
+            (vec![0x1B, b'[' as u16, b'1' as u16, b';' as u16, b'3' as u16, b'D' as u16], Key::AltLeft),
+            (vec![0x1B, b'[' as u16, b'5' as u16, b'~' as u16], Key::PageUp),
+            (vec![0x1B, b'[' as u16, b'F' as u16], Key::End),
+            (vec![0x1B, b'O' as u16, b'A' as u16], Key::Up),
+        ]
+    }
+
+    #[test]
+    fn vt_feed_reassembles_sequences() {
+        for (seq, expected) in vt_seqs() {
+            VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+            VT_PENDING.store(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
+            for (i, &ch) in seq.iter().enumerate() {
+                let key = vt_feed(ch);
+                if i + 1 == seq.len() {
+                    assert_eq!(key, Some(expected), "seq {:?} must end on {expected:?}", seq);
+                } else {
+                    assert!(key.is_none(), "seq {:?} must not complete early ({key:?})", seq);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vt_feed_plain_char_and_lone_escape() {
+        VT_SEQ_LEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        VT_PENDING.store(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(vt_feed(b'a' as u16), Some(Key::Char('a')));
+        assert_eq!(vt_feed(0x08), Some(Key::Backspace));
+        // A lone ESC is delivered as Escape; the next char is fed back.
+        assert_eq!(vt_feed(0x1B), None);
+        assert_eq!(vt_feed(b'x' as u16), Some(Key::Escape));
+        assert_eq!(VT_PENDING.load(std::sync::atomic::Ordering::Relaxed), b'x' as u16);
+        VT_PENDING.store(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
+        // And throws away unknown control bytes.
+        assert_eq!(vt_feed(0x01), None);
+    }
+
     #[test]
     fn decode_mouse_left_press() {
         let rec = mouse_record(5, 3, FROM_LEFT_1ST_BUTTON_PRESSED, 0, 0);
@@ -507,5 +725,30 @@ mod tests {
         let rec = InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event };
         assert!(!is_mouse(&rec));
         assert!(is_key_down(&rec));
+    }
+
+    #[test]
+    fn read_key_decodes_injected_vt_f1_records() {
+        // Skip when the test process has no real console input buffer.
+        unsafe {
+            let hin = GetStdHandle(STD_INPUT_HANDLE);
+            let mut mode: Dword = 0;
+            if GetConsoleMode(hin, &mut mode) == 0 {
+                return;
+            }
+            // Inject ESC O P as three ConPTY-style character records and read
+            // them back through the real `read_key` path.
+            let recs = [
+                char_record(0x1B),
+                char_record(b'O' as u16),
+                char_record(b'P' as u16),
+            ];
+            let mut written: Dword = 0;
+            if WriteConsoleInputW(hin, recs.as_ptr(), 3, &mut written) == 0 || written != 3 {
+                return;
+            }
+        }
+        // read_key returns only when a full sequence decodes: F1.
+        assert_eq!(read_key(), Key::F1, "ESC O P records must decode to F1");
     }
 }

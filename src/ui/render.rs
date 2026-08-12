@@ -8,9 +8,9 @@ use super::pointer::Pointer;
 use super::screen::{BoxSelect, ScreenGrid, StampWriter};
 use super::window::{MIN_W, MIN_H};
 use super::{desktop_at, draw_command_panel, draw_desktop, draw_menu_content, draw_scrollbar,
-            draw_status_bar, draw_tab, draw_emulator_content, draw_shell_content,
-            draw_terminal_content, scrollbar_thumb, tab_char_at, CMD_INPUT_X, DESKTOP_AREA_LEN,
-            STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
+            draw_status_bar, draw_tab, draw_emulator_content, draw_help_content,
+            draw_shell_content, draw_terminal_content, scrollbar_thumb, tab_char_at,
+            CMD_INPUT_X, DESKTOP_AREA_LEN, STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
 use crate::app::Application;
 use crate::cmd::CommandEntry;
 use crate::input;
@@ -79,6 +79,9 @@ pub fn render<W: std::io::Write>(
                     } else if let Some(menu) = app.menu.as_ref() {
                         // Start menu: manifest entries with the selection.
                         draw_menu_content(&mut frame_out, win, menu);
+                    } else if let Some(help) = app.help.as_ref() {
+                        // Help window: the wrapped usage crib sheet.
+                        draw_help_content(&mut frame_out, win, help);
                     }
                 }
             }
@@ -515,6 +518,7 @@ mod tests {
             is_menu: false,
             terminal: Some(ts),
             menu: None,
+            help: None,
         }];
 
         let pointer = Pointer::new(20, 10);
@@ -525,6 +529,33 @@ mod tests {
             &applications,
             None, None, w, h,
             &pointer, 0, 0, "", None, &[], 0, 1, Some((0, "", 0)),
+            &mut grid, None, 1, false, true,
+        );
+        let bad = out_of_bounds_moves(&buf, w, h);
+        assert!(bad.is_empty(), "render wrote out of bounds: {bad:?}");
+    }
+
+    #[test]
+    fn render_help_window_stays_in_bounds() {
+        let w: u16 = 100;
+        let h: u16 = 30;
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+
+        // A help window next to terminals: its wrapped crib sheet must stay
+        // inside the window and the screen.
+        let applications = vec![
+            Application::help_window("Help", Window::new(12, 4, 80, 22, 2)),
+            Application::terminal_window("T", Window::new(2, 2, 30, 8, 0), cwd.clone(), Vec::new()),
+        ];
+
+        let pointer = Pointer::new(20, 10);
+        let mut buf = Vec::new();
+        let mut grid = crate::ui::screen::ScreenGrid::new(w, h);
+        render(
+            &mut buf,
+            &applications,
+            None, None, w, h,
+            &pointer, 0, 0, "", None, &[], 0, 1, None,
             &mut grid, None, 1, false, true,
         );
         let bad = out_of_bounds_moves(&buf, w, h);

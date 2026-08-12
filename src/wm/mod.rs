@@ -571,6 +571,36 @@ pub fn toggle_start_menu(
     true
 }
 
+/// Open (or close, when already open) the help window, centered on the
+/// screen and sized to the crib sheet.
+pub fn toggle_help_window(
+    applications: &mut Vec<Application>,
+    current_desktop: usize,
+    screen_w: u16,
+    screen_h: u16,
+    tab_scroll: &mut usize,
+) -> bool {
+    if let Some(idx) = applications.iter().position(|a| a.on_desktop(current_desktop) && a.help.is_some()) {
+        applications.remove(idx);
+    } else {
+        let longest = crate::help::content().iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        let win_w = ((longest + 6).clamp(48, 96) as u16).min(screen_w.saturating_sub(2));
+        let win_h = ((screen_h.saturating_sub(4)).min(24)).max(MIN_H);
+        let pos_x = (screen_w.saturating_sub(win_w)) / 2;
+        let pos_y = (screen_h.saturating_sub(3).saturating_sub(win_h)) / 2;
+        applications.push(Application::help_window(
+            "Help",
+            Window::new(pos_x.max(1), pos_y.max(1), win_w, win_h, 0),
+        ).with_desktop(current_desktop));
+        bring_window_to_front(applications, applications.len() - 1);
+    }
+    *tab_scroll = (*tab_scroll).min(max_tab_scroll(applications, current_desktop, screen_h));
+    true
+}
+
 pub fn toggle_active_maximize(applications: &mut [Application], mode: &Mode, current_desktop: usize, screen_w: u16, screen_h: u16) -> bool {
     let Some(idx) = active_window_idx(applications, mode, current_desktop) else {
         return false;
