@@ -2,6 +2,14 @@
 
 Manto is a terminal-driven desktop environment written in Rust. It provides floating windows, multiple desktops, a dock shell, detached terminal windows, window snapping, splitting, resizing, keyboard-first navigation and **mouse support**. The desktop is rendered with damage-tracking (no full redraw per frame), sessions persist between runs and the shortcuts/theme are configurable.
 
+> **AI-generated code**: this entire codebase was written with extensive use of
+> AI assistance — every file, feature and fix in this repository was produced
+> by AI tooling.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## How To Run
 
 ```bash

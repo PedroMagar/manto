@@ -322,6 +322,10 @@ pub fn read_key() -> Key {
             if ctrl && vk == 0x32 { return Key::Ctrl2; }
             if ctrl && vk == 0x33 { return Key::Ctrl3; }
             if ctrl && vk == 0x34 { return Key::Ctrl4; }
+            if ctrl && vk == 0x61 { return Key::Ctrl1; }
+            if ctrl && vk == 0x62 { return Key::Ctrl2; }
+            if ctrl && vk == 0x63 { return Key::Ctrl3; }
+            if ctrl && vk == 0x64 { return Key::Ctrl4; }
             if alt && vk == 0x26 { return Key::AltUp; }
             if alt && vk == 0x28 { return Key::AltDown; }
             if alt && vk == 0x25 { return Key::AltLeft; }
@@ -750,5 +754,39 @@ mod tests {
         }
         // read_key returns only when a full sequence decodes: F1.
         assert_eq!(read_key(), Key::F1, "ESC O P records must decode to F1");
+    }
+
+    #[test]
+    fn read_key_decodes_injected_ctrl_numpad_records() {
+        // Skip when the test process has no real console input buffer.
+        unsafe {
+            let hin = GetStdHandle(STD_INPUT_HANDLE);
+            let mut mode: Dword = 0;
+            if GetConsoleMode(hin, &mut mode) == 0 {
+                return;
+            }
+            // Ctrl+Numpad1..4 arrive as KEY_EVENT_RECORDs with VK_NUMPADn
+            // (0x61..0x64) and the Ctrl modifier bit set.
+            let recs = [
+                vk_record(0x61, LEFT_CTRL),
+                vk_record(0x64, LEFT_CTRL),
+            ];
+            let mut written: Dword = 0;
+            if WriteConsoleInputW(hin, recs.as_ptr(), 2, &mut written) == 0 || written != 2 {
+                return;
+            }
+        }
+        assert_eq!(read_key(), Key::Ctrl1, "Ctrl+Numpad1 must decode to Ctrl1");
+        assert_eq!(read_key(), Key::Ctrl4, "Ctrl+Numpad4 must decode to Ctrl4");
+    }
+
+    /// A KEY_EVENT_RECORD carrying a virtual key code with modifier state.
+    fn vk_record(vk: u16, ctrl: u32) -> InputRecord {
+        let mut event = [0u8; 16];
+        event[0..4].copy_from_slice(&1i32.to_ne_bytes()); // bKeyDown = 1
+        event[6..8].copy_from_slice(&vk.to_ne_bytes());   // wVK
+        event[10..12].copy_from_slice(&('1' as u16).to_ne_bytes()); // uChar
+        event[12..16].copy_from_slice(&ctrl.to_ne_bytes()); // dwControlKeyState
+        InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event }
     }
 }
