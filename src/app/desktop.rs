@@ -60,7 +60,7 @@ pub struct Desktop {
     /// When the mouse was last used; gates pointer visibility in interactive
     /// apps so it does not double with the app's own cursor.
     pub last_mouse: Option<Clock>,
-    /// Master switch for pointer events (Ctrl+M toggles). When off, mouse
+    /// Master switch for pointer events (Alt+M toggles). When off, mouse
     /// input is ignored entirely and the pointer is driven only by the
     /// keyboard.
     pub mouse_enabled: bool,
@@ -267,7 +267,7 @@ impl Desktop {
             self.quit = true;
             return false;
         }
-        // Mouse disabled (Ctrl+M): drop pointer events before handling.
+        // Mouse disabled (Alt+M): drop pointer events before handling.
         if !self.mouse_enabled && matches!(key, Key::Mouse(_)) {
             return false;
         }

@@ -74,7 +74,7 @@ Mouse input is a host concern with two fetch paths:
   (e.g. Windows Terminal via ConPTY) relay pointer events, and physical
   conhost clicks reach the same decoder.
 
-`Desktop.mouse_enabled` (default on, toggled with Ctrl+M, configurable) gates
+`Desktop.mouse_enabled` (default on, toggled with Alt+M, configurable) gates
 all pointer handling; when off, pointer events are dropped and the pointer is
 driven only by the keyboard.
 

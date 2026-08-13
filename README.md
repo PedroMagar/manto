@@ -29,7 +29,7 @@ The dock shell lives on the bottom bar. Press `Space` or `Enter` on the `.> ` ar
 
 ## Mouse
 
-Mouse is **enabled by default** and can be toggled with **`Ctrl+M`** (or
+Mouse is **enabled by default** and can be toggled with **`Alt+M`** (or
 `"mouse"` in `~/.manto/config.json`). While enabled:
 
 - **Hover** over the window chrome, tabs, scrollbars, the Start button and the
@@ -52,17 +52,13 @@ Mouse is **enabled by default** and can be toggled with **`Ctrl+M`** (or
   (SGR); clicking anywhere in the app body enters it, clicking outside leaves
   it. Click-drag there goes to the app (its own selection), not Manto's.
 - Free screen selection is also available with `Shift+arrows`; `Enter`/`Ctrl+C`
-  copies the current box. `Ctrl+M` is handy when a console app grabs clicks
+  copies the current box. `Alt+M` is handy when a console app grabs clicks
   you want for yourself.
-
-Note: **`Ctrl+M` is Windows-only** — the Unix console encodes Ctrl+M the same
-as Enter, so there the shortcut is unavailable (mouse can be disabled via
-`config.json` by remapping the `"mouse"` action to another key).
 
 ## Shortcuts
 
 Shortcuts marked *configurable* can be remapped in `~/.manto/config.json`
-under `"shortcuts"` (e.g. `{ "terminal": "ctrl+t", "mouse": "ctrl+m" }`).
+under `"shortcuts"` (e.g. `{ "terminal": "ctrl+t", "mouse": "alt+m" }`).
 
 ### Global Window/Desktop Shortcuts
 
@@ -77,7 +73,7 @@ under `"shortcuts"` (e.g. `{ "terminal": "ctrl+t", "mouse": "ctrl+m" }`).
   with all usage tips and shortcuts (scroll with arrows/Page keys or the
   wheel; `Esc` or another `F1`/`Ctrl+H` closes). `Ctrl+H` is Windows-only —
   the Unix console encodes it as Backspace, so there use `F1`.
-- `Ctrl+M` *configurable*: toggle mouse input (default on).
+- `Alt+M` *configurable*: toggle mouse input (default on).
 - `Ctrl+1`, `Ctrl+2`, `Ctrl+3`, `Ctrl+4`: move the active window to desktop 1-4 and follow it.
 - `1`, `2`, `3`, `4`: switch to desktop 1-4.
 - `Ctrl+Delete` *configurable*: quit Manto (also saves the session).
@@ -172,7 +168,7 @@ that way automatically. Inside:
 ```json
 {
   "theme": 1,
-  "shortcuts": { "terminal": "ctrl+t", "mouse": "ctrl+m" }
+  "shortcuts": { "terminal": "ctrl+t", "mouse": "alt+m" }
 }
 ```
 

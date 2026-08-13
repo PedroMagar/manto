@@ -107,7 +107,7 @@ fn default_shortcuts() -> Vec<(Key, Action)> {
         (Key::CtrlN, Action::FocusNext),
         (Key::CtrlP, Action::FocusPrev),
         (Key::AltR, Action::ResizeActive),
-        (Key::CtrlM, Action::ToggleMouse),
+        (Key::AltM, Action::ToggleMouse),
         (Key::CtrlDelete, Action::Quit),
     ]
 }
@@ -159,7 +159,6 @@ fn parse_shortcut(spec: &str) -> Option<Key> {
             "t" => Some(Key::CtrlT),
             "delete" => Some(Key::CtrlDelete),
             "enter" => Some(Key::CtrlEnter),
-            "m" => Some(Key::CtrlM),
             _ => None,
         };
     }
@@ -168,6 +167,7 @@ fn parse_shortcut(spec: &str) -> Option<Key> {
             "v" => Some(Key::AltV),
             "h" => Some(Key::AltH),
             "r" => Some(Key::AltR),
+            "m" => Some(Key::AltM),
             "up" => Some(Key::AltUp),
             "down" => Some(Key::AltDown),
             "left" => Some(Key::AltLeft),
@@ -193,10 +193,11 @@ mod tests {
         let config = Config::new(1);
         assert_eq!(config.resolve(&Key::CtrlT), Some(Action::NewTerminal));
         assert_eq!(config.resolve(&Key::CtrlF), Some(Action::ToggleMaximize));
-        assert_eq!(config.resolve(&Key::CtrlM), Some(Action::ToggleMouse));
+        assert_eq!(config.resolve(&Key::AltM), Some(Action::ToggleMouse));
         assert_eq!(config.resolve(&Key::CtrlDelete), Some(Action::Quit));
         assert_eq!(config.resolve(&Key::CtrlH), Some(Action::Help));
         assert_eq!(config.resolve(&Key::F1), Some(Action::Help));
+        assert_eq!(config.resolve(&Key::AltM), Some(Action::ToggleMouse));
         assert_eq!(config.resolve(&Key::Enter), None);
     }
 
@@ -217,9 +218,10 @@ mod tests {
     fn shortcut_spec_parsing() {
         assert_eq!(parse_shortcut("ctrl+t"), Some(Key::CtrlT));
         assert_eq!(parse_shortcut("ALT+V"), Some(Key::AltV));
-        assert_eq!(parse_shortcut("ctrl+m"), Some(Key::CtrlM));
         assert_eq!(parse_shortcut("ctrl+h"), Some(Key::CtrlH));
         assert_eq!(parse_shortcut("f1"), Some(Key::F1));
+        assert_eq!(parse_shortcut("alt+m"), Some(Key::AltM));
+        assert_eq!(parse_shortcut("ctrl+m"), None);
         assert_eq!(parse_shortcut("enter"), Some(Key::Enter));
         assert_eq!(parse_shortcut("space"), Some(Key::Char(' ')));
         assert_eq!(parse_shortcut("ctrl+a"), None);

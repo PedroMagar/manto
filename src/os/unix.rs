@@ -198,6 +198,7 @@ pub fn read_key() -> Key {
                             b'h' | b'H' => return Key::AltH,
                             b'r' | b'R' => return Key::AltR,
                             b'v' | b'V' => return Key::AltV,
+                            b'm' | b'M' => return Key::AltM,
                             b'O' => {
                                 // SS3 function keys: ESC O P (F1), ...
                                 let mut last = [0u8; 1];

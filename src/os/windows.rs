@@ -347,10 +347,10 @@ pub fn read_key() -> Key {
             if ctrl && vk == 0x58 { return Key::CtrlX; }
             if ctrl && vk == 0x5A { return Key::CtrlZ; }
             if ctrl && vk == 0x54 { return Key::CtrlT; }
-            if ctrl && vk == 0x4D { return Key::CtrlM; }
             if alt && vk == 0x48 { return Key::AltH; }
             if alt && vk == 0x52 { return Key::AltR; }
             if alt && vk == 0x56 { return Key::AltV; }
+            if alt && vk == 0x4D { return Key::AltM; }
 
             // Ctrl+Enter uses GetKeyState (real-time state) because
             // dwControlKeyState may not report Ctrl correctly in this context.

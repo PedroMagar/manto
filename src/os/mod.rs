@@ -98,9 +98,9 @@ pub enum Key {
     AltH,
     AltR,
     AltV,
+    AltM,
     CtrlEnter,
     CtrlT,
-    CtrlM,
     Mouse(MouseEvent),
 }
 
