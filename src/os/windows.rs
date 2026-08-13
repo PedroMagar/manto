@@ -8,40 +8,40 @@ use super::Key;
 use std::time::{Duration, Instant};
 
 type Handle = *mut u8;
-type Bool   = i32;
-type Dword  = u32;
-type Short  = i16;
-type Word   = u16;
+type Bool = i32;
+type Dword = u32;
+type Short = i16;
+type Word = u16;
 
-const STD_INPUT_HANDLE:  Dword = 0xFFFFFFF6;
+const STD_INPUT_HANDLE: Dword = 0xFFFFFFF6;
 const STD_OUTPUT_HANDLE: Dword = 0xFFFFFFF5;
 
-const ENABLE_LINE_INPUT:                  Dword = 0x0002;
-const ENABLE_ECHO_INPUT:                  Dword = 0x0004;
-const ENABLE_PROCESSED_INPUT:             Dword = 0x0001;
-const ENABLE_MOUSE_INPUT:                 Dword = 0x0010;
-const ENABLE_WINDOW_INPUT:                Dword = 0x0008;
+const ENABLE_LINE_INPUT: Dword = 0x0002;
+const ENABLE_ECHO_INPUT: Dword = 0x0004;
+const ENABLE_PROCESSED_INPUT: Dword = 0x0001;
+const ENABLE_MOUSE_INPUT: Dword = 0x0010;
+const ENABLE_WINDOW_INPUT: Dword = 0x0008;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
-const ENABLE_PROCESSED_OUTPUT:            Dword = 0x0001;
+const ENABLE_PROCESSED_OUTPUT: Dword = 0x0001;
 
-const WAIT_OBJECT_0:   Dword = 0;
-const KEY_EVENT_TYPE:  Word  = 0x0001;
+const WAIT_OBJECT_0: Dword = 0;
+const KEY_EVENT_TYPE: Word = 0x0001;
 const MOUSE_EVENT_TYPE: Word = 0x0002;
-const LEFT_CTRL:       Dword = 0x0008;
-const RIGHT_CTRL:      Dword = 0x0004;
-const LEFT_ALT:        Dword = 0x0002;
-const RIGHT_ALT:       Dword = 0x0001;
-const VK_SHIFT:        i32   = 0x10;
-const GMEM_MOVEABLE:   Dword = 0x0002;
-const CF_UNICODETEXT:  Dword = 13;
+const LEFT_CTRL: Dword = 0x0008;
+const RIGHT_CTRL: Dword = 0x0004;
+const LEFT_ALT: Dword = 0x0002;
+const RIGHT_ALT: Dword = 0x0001;
+const VK_SHIFT: i32 = 0x10;
+const GMEM_MOVEABLE: Dword = 0x0002;
+const CF_UNICODETEXT: Dword = 13;
 
 // MOUSE_EVENT_RECORD event flags.
-const MOUSE_MOVED:     Dword = 0x0001;
-const MOUSE_WHEELED:   Dword = 0x0004;
+const MOUSE_MOVED: Dword = 0x0001;
+const MOUSE_WHEELED: Dword = 0x0004;
 
 // MOUSE_EVENT_RECORD dwButtonState bits.
 const FROM_LEFT_1ST_BUTTON_PRESSED: Dword = 0x0001;
-const RIGHTMOST_BUTTON_PRESSED:     Dword = 0x0002;
+const RIGHTMOST_BUTTON_PRESSED: Dword = 0x0002;
 const FROM_LEFT_2ND_BUTTON_PRESSED: Dword = 0x0004;
 
 // MOUSE_EVENT_RECORD dwControlKeyState bits.
@@ -50,31 +50,47 @@ const SHIFT_PRESSED: Dword = 0x0010;
 // GetKeyState/GetAsyncKeyState-style: ctrl/alt are read from key state like
 // the keyboard path, so we only need SHIFT here; ctrl/alt use VK values.
 const VK_CONTROL: i32 = 0x11;
-const VK_MENU:    i32 = 0x12;
+const VK_MENU: i32 = 0x12;
 
 // INPUT_RECORD: WORD EventType (2) + WORD pad (2) + union Event (16 bytes)
 #[repr(C)]
-struct InputRecord { event_type: Word, _pad: Word, event: [u8; 16] }
+struct InputRecord {
+    event_type: Word,
+    _pad: Word,
+    event: [u8; 16],
+}
 
-#[repr(C)] struct Coord        { x: Short, y: Short }
-#[repr(C)] struct SmallRect    { left: Short, top: Short, right: Short, bottom: Short }
-#[repr(C)] struct ScreenBufInfo {
-    dw_size:                Coord,
-    dw_cursor_position:     Coord,
-    w_attributes:           Word,
-    sr_window:              SmallRect,
+#[repr(C)]
+struct Coord {
+    x: Short,
+    y: Short,
+}
+#[repr(C)]
+struct SmallRect {
+    left: Short,
+    top: Short,
+    right: Short,
+    bottom: Short,
+}
+#[repr(C)]
+struct ScreenBufInfo {
+    dw_size: Coord,
+    dw_cursor_position: Coord,
+    w_attributes: Word,
+    sr_window: SmallRect,
     dw_maximum_window_size: Coord,
 }
 
 unsafe extern "system" {
     fn GetStdHandle(n: Dword) -> Handle;
     fn GetConsoleMode(h: Handle, mode: *mut Dword) -> Bool;
-    fn SetConsoleMode(h: Handle, mode: Dword)      -> Bool;
+    fn SetConsoleMode(h: Handle, mode: Dword) -> Bool;
     fn GetConsoleScreenBufferInfo(h: Handle, info: *mut ScreenBufInfo) -> Bool;
-    fn WaitForSingleObject(h: Handle, ms: Dword)   -> Dword;
+    fn WaitForSingleObject(h: Handle, ms: Dword) -> Dword;
     fn ReadConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
     #[cfg(test)]
-    fn WriteConsoleInputW(h: Handle, buf: *const InputRecord, len: Dword, read: *mut Dword) -> Bool;
+    fn WriteConsoleInputW(h: Handle, buf: *const InputRecord, len: Dword, read: *mut Dword)
+    -> Bool;
     fn PeekConsoleInputW(h: Handle, buf: *mut InputRecord, len: Dword, read: *mut Dword) -> Bool;
     fn GetNumberOfConsoleInputEvents(h: Handle, count: *mut Dword) -> Bool;
     fn GetKeyState(n_virt_key: i32) -> i16;
@@ -93,27 +109,45 @@ unsafe extern "system" {
     fn GlobalSize(h_mem: Handle) -> usize;
 }
 
-static mut ORIG_IN_MODE:  Dword = 0;
+static mut ORIG_IN_MODE: Dword = 0;
 static mut ORIG_OUT_MODE: Dword = 0;
 
 // Helpers to read KEY_EVENT_RECORD fields out of event: [u8; 16].
 // KEY_EVENT_RECORD layout: bKeyDown(i32@0) wRepeat(u16@4) wVK(u16@6)
 //   wScan(u16@8) uChar/WCHAR(u16@10) dwCtrl(u32@12)
-fn ke_key_down(e: &[u8; 16]) -> bool { i32::from_ne_bytes([e[0],e[1],e[2],e[3]]) != 0 }
-fn ke_vk(e: &[u8; 16])       -> u16  { u16::from_ne_bytes([e[6], e[7]]) }
-fn ke_char(e: &[u8; 16])     -> u16  { u16::from_ne_bytes([e[10],e[11]]) }
-fn ke_ctrl(e: &[u8; 16])     -> u32  { u32::from_ne_bytes([e[12],e[13],e[14],e[15]]) }
+fn ke_key_down(e: &[u8; 16]) -> bool {
+    i32::from_ne_bytes([e[0], e[1], e[2], e[3]]) != 0
+}
+fn ke_vk(e: &[u8; 16]) -> u16 {
+    u16::from_ne_bytes([e[6], e[7]])
+}
+fn ke_char(e: &[u8; 16]) -> u16 {
+    u16::from_ne_bytes([e[10], e[11]])
+}
+fn ke_ctrl(e: &[u8; 16]) -> u32 {
+    u32::from_ne_bytes([e[12], e[13], e[14], e[15]])
+}
 
 // MOUSE_EVENT_RECORD layout (inside the 16-byte event union):
 //   dwMousePosition   COORD (Short x@0, Short y@2)
 //   dwButtonState     DWORD @4
 //   dwControlKeyState DWORD @8
 //   dwEventFlags      DWORD @12
-fn me_x(e: &[u8; 16])    -> u16  { i16::from_ne_bytes([e[0], e[1]]) as u16 }
-fn me_y(e: &[u8; 16])    -> u16  { i16::from_ne_bytes([e[2], e[3]]) as u16 }
-fn me_button(e: &[u8;16])-> u32  { u32::from_ne_bytes([e[4],e[5],e[6],e[7]]) }
-fn me_ctrl(e: &[u8;16])  -> u32  { u32::from_ne_bytes([e[8],e[9],e[10],e[11]]) }
-fn me_flags(e: &[u8;16]) -> u32  { u32::from_ne_bytes([e[12],e[13],e[14],e[15]]) }
+fn me_x(e: &[u8; 16]) -> u16 {
+    i16::from_ne_bytes([e[0], e[1]]) as u16
+}
+fn me_y(e: &[u8; 16]) -> u16 {
+    i16::from_ne_bytes([e[2], e[3]]) as u16
+}
+fn me_button(e: &[u8; 16]) -> u32 {
+    u32::from_ne_bytes([e[4], e[5], e[6], e[7]])
+}
+fn me_ctrl(e: &[u8; 16]) -> u32 {
+    u32::from_ne_bytes([e[8], e[9], e[10], e[11]])
+}
+fn me_flags(e: &[u8; 16]) -> u32 {
+    u32::from_ne_bytes([e[12], e[13], e[14], e[15]])
+}
 
 fn is_key_down(rec: &InputRecord) -> bool {
     rec.event_type == KEY_EVENT_TYPE && ke_key_down(&rec.event)
@@ -141,20 +175,30 @@ fn decode_mouse(rec: &InputRecord) -> Key {
     let shift = ctrl_state & SHIFT_PRESSED != 0;
 
     let pressed = |btn| MouseEvent {
-        x, y,
+        x,
+        y,
         kind: MouseAction::Press,
         button: btn,
-        shift, ctrl, alt,
+        shift,
+        ctrl,
+        alt,
     };
 
     if flags & MOUSE_WHEELED != 0 {
         let delta = ((button_state >> 16) as u16) as i16;
-        let button = if delta > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
+        let button = if delta > 0 {
+            MouseButton::WheelUp
+        } else {
+            MouseButton::WheelDown
+        };
         return Key::Mouse(pressed(button));
     }
 
     if flags & MOUSE_MOVED != 0 {
-        let held = button_state & (FROM_LEFT_1ST_BUTTON_PRESSED | RIGHTMOST_BUTTON_PRESSED | FROM_LEFT_2ND_BUTTON_PRESSED);
+        let held = button_state
+            & (FROM_LEFT_1ST_BUTTON_PRESSED
+                | RIGHTMOST_BUTTON_PRESSED
+                | FROM_LEFT_2ND_BUTTON_PRESSED);
         if held != 0 {
             let button = if held & FROM_LEFT_1ST_BUTTON_PRESSED != 0 {
                 MouseButton::Left
@@ -163,9 +207,25 @@ fn decode_mouse(rec: &InputRecord) -> Key {
             } else {
                 MouseButton::Middle
             };
-            return Key::Mouse(MouseEvent { x, y, kind: MouseAction::Drag, button, shift, ctrl, alt });
+            return Key::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseAction::Drag,
+                button,
+                shift,
+                ctrl,
+                alt,
+            });
         }
-        return Key::Mouse(MouseEvent { x, y, kind: MouseAction::Move, button: MouseButton::Left, shift, ctrl, alt });
+        return Key::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseAction::Move,
+            button: MouseButton::Left,
+            shift,
+            ctrl,
+            alt,
+        });
     }
 
     if button_state & FROM_LEFT_1ST_BUTTON_PRESSED != 0 {
@@ -179,27 +239,35 @@ fn decode_mouse(rec: &InputRecord) -> Key {
     }
 
     // No button and no flags: a button just went up.
-    Key::Mouse(MouseEvent { x, y, kind: MouseAction::Release, button: MouseButton::Left, shift, ctrl, alt })
+    Key::Mouse(MouseEvent {
+        x,
+        y,
+        kind: MouseAction::Release,
+        button: MouseButton::Left,
+        shift,
+        ctrl,
+        alt,
+    })
 }
 
 pub fn enable_raw_mode() {
     unsafe {
-        let hin  = GetStdHandle(STD_INPUT_HANDLE);
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
         let hout = GetStdHandle(STD_OUTPUT_HANDLE);
-        GetConsoleMode(hin,  &raw mut ORIG_IN_MODE);
+        GetConsoleMode(hin, &raw mut ORIG_IN_MODE);
         GetConsoleMode(hout, &raw mut ORIG_OUT_MODE);
 
         // No VT input: records are read directly via ReadConsoleInputW.
         // Mouse stays enabled so MOUSE_EVENT_RECORDs reach read_key.
         let new_in = ORIG_IN_MODE
-            & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT
+            & !(ENABLE_LINE_INPUT
+                | ENABLE_ECHO_INPUT
+                | ENABLE_PROCESSED_INPUT
                 | ENABLE_WINDOW_INPUT)
             | ENABLE_MOUSE_INPUT;
         SetConsoleMode(hin, new_in);
 
-        let new_out = ORIG_OUT_MODE
-            | ENABLE_VIRTUAL_TERMINAL_PROCESSING
-            | ENABLE_PROCESSED_OUTPUT;
+        let new_out = ORIG_OUT_MODE | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT;
         SetConsoleMode(hout, new_out);
     }
 
@@ -216,9 +284,9 @@ pub fn disable_raw_mode() {
     // (after the restore the VT escapes would be printed literally).
     write_mouse_mode(false);
     unsafe {
-        let hin  = GetStdHandle(STD_INPUT_HANDLE);
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
         let hout = GetStdHandle(STD_OUTPUT_HANDLE);
-        SetConsoleMode(hin,  ORIG_IN_MODE);
+        SetConsoleMode(hin, ORIG_IN_MODE);
         SetConsoleMode(hout, ORIG_OUT_MODE);
     }
 }
@@ -246,8 +314,8 @@ pub fn size() -> (u16, u16) {
         let hout = GetStdHandle(STD_OUTPUT_HANDLE);
         let mut info = std::mem::zeroed::<ScreenBufInfo>();
         GetConsoleScreenBufferInfo(hout, &mut info);
-        let w = (info.sr_window.right  - info.sr_window.left + 1) as u16;
-        let h = (info.sr_window.bottom - info.sr_window.top  + 1) as u16;
+        let w = (info.sr_window.right - info.sr_window.left + 1) as u16;
+        let h = (info.sr_window.bottom - info.sr_window.top + 1) as u16;
         (w, h)
     }
 }
@@ -259,12 +327,16 @@ fn drain_non_key(hin: Handle) -> bool {
         loop {
             let mut count = 0u32;
             GetNumberOfConsoleInputEvents(hin, &mut count);
-            if count == 0 { return false; }
+            if count == 0 {
+                return false;
+            }
 
             let mut rec = std::mem::zeroed::<InputRecord>();
             let mut peeked = 0u32;
             PeekConsoleInputW(hin, &mut rec, 1, &mut peeked);
-            if peeked == 0 { return false; }
+            if peeked == 0 {
+                return false;
+            }
 
             if is_key_down(&rec) || is_mouse(&rec) {
                 return true;
@@ -281,16 +353,22 @@ fn drain_non_key(hin: Handle) -> bool {
 pub fn poll(timeout_ms: u64) -> bool {
     unsafe {
         let hin = GetStdHandle(STD_INPUT_HANDLE);
-        if drain_non_key(hin) { return true; }
+        if drain_non_key(hin) {
+            return true;
+        }
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let now = Instant::now();
-            if now >= deadline { return false; }
+            if now >= deadline {
+                return false;
+            }
             let rem = (deadline - now).as_millis().min(50) as Dword;
 
             if WaitForSingleObject(hin, rem) == WAIT_OBJECT_0 {
-                if drain_non_key(hin) { return true; }
+                if drain_non_key(hin) {
+                    return true;
+                }
             } else {
                 return false;
             }
@@ -305,58 +383,130 @@ pub fn read_key() -> Key {
             let mut rec = std::mem::zeroed::<InputRecord>();
             let mut read = 0u32;
             ReadConsoleInputW(hin, &mut rec, 1, &mut read);
-            if read == 0 { continue; }
+            if read == 0 {
+                continue;
+            }
 
             if is_mouse(&rec) {
                 return decode_mouse(&rec);
             }
-            if !is_key_down(&rec) { continue; }
+            if !is_key_down(&rec) {
+                continue;
+            }
 
-            let vk   = ke_vk(&rec.event);
-            let ch   = ke_char(&rec.event);
+            let vk = ke_vk(&rec.event);
+            let ch = ke_char(&rec.event);
             let ctrl = ke_ctrl(&rec.event) & (LEFT_CTRL | RIGHT_CTRL) != 0;
-            let alt  = ke_ctrl(&rec.event) & (LEFT_ALT | RIGHT_ALT) != 0;
+            let alt = ke_ctrl(&rec.event) & (LEFT_ALT | RIGHT_ALT) != 0;
             let shift = GetKeyState(VK_SHIFT) as u16 & 0x8000 != 0;
 
-            if ctrl && vk == 0x31 { return Key::Ctrl1; }
-            if ctrl && vk == 0x32 { return Key::Ctrl2; }
-            if ctrl && vk == 0x33 { return Key::Ctrl3; }
-            if ctrl && vk == 0x34 { return Key::Ctrl4; }
-            if ctrl && vk == 0x61 { return Key::Ctrl1; }
-            if ctrl && vk == 0x62 { return Key::Ctrl2; }
-            if ctrl && vk == 0x63 { return Key::Ctrl3; }
-            if ctrl && vk == 0x64 { return Key::Ctrl4; }
-            if alt && vk == 0x26 { return Key::AltUp; }
-            if alt && vk == 0x28 { return Key::AltDown; }
-            if alt && vk == 0x25 { return Key::AltLeft; }
-            if alt && vk == 0x27 { return Key::AltRight; }
-            if ctrl && vk == 0x2E { return Key::CtrlDelete; }
-            if ch == 0x03 || (ctrl && vk == 0x43) { return Key::CtrlC; }
-            if ctrl && vk == 0x44 { return Key::CtrlD; }
-            if ctrl && vk == 0x45 { return Key::CtrlE; }
-            if ctrl && vk == 0x46 { return Key::CtrlF; }
-            if ctrl && vk == 0x48 { return Key::CtrlH; }
-            if ctrl && vk == 0x4A { return Key::CtrlJ; }
-            if ctrl && vk == 0x4B { return Key::CtrlK; }
-            if ctrl && vk == 0x4C { return Key::CtrlL; }
-            if ctrl && vk == 0x4E { return Key::CtrlN; }
-            if ctrl && vk == 0x50 { return Key::CtrlP; }
-            if ctrl && vk == 0x51 { return Key::CtrlQ; }
-            if ctrl && vk == 0x56 { return Key::CtrlV; }
-            if ctrl && vk == 0x57 { return Key::CtrlW; }
-            if ctrl && vk == 0x58 { return Key::CtrlX; }
-            if ctrl && vk == 0x5A { return Key::CtrlZ; }
-            if ctrl && vk == 0x54 { return Key::CtrlT; }
-            if alt && vk == 0x48 { return Key::AltH; }
-            if alt && vk == 0x52 { return Key::AltR; }
-            if alt && vk == 0x56 { return Key::AltV; }
-            if alt && vk == 0x4D { return Key::AltM; }
+            if ctrl && vk == 0x31 {
+                return Key::Ctrl1;
+            }
+            if ctrl && vk == 0x32 {
+                return Key::Ctrl2;
+            }
+            if ctrl && vk == 0x33 {
+                return Key::Ctrl3;
+            }
+            if ctrl && vk == 0x34 {
+                return Key::Ctrl4;
+            }
+            if ctrl && vk == 0x61 {
+                return Key::Ctrl1;
+            }
+            if ctrl && vk == 0x62 {
+                return Key::Ctrl2;
+            }
+            if ctrl && vk == 0x63 {
+                return Key::Ctrl3;
+            }
+            if ctrl && vk == 0x64 {
+                return Key::Ctrl4;
+            }
+            if alt && vk == 0x26 {
+                return Key::AltUp;
+            }
+            if alt && vk == 0x28 {
+                return Key::AltDown;
+            }
+            if alt && vk == 0x25 {
+                return Key::AltLeft;
+            }
+            if alt && vk == 0x27 {
+                return Key::AltRight;
+            }
+            if ctrl && vk == 0x2E {
+                return Key::CtrlDelete;
+            }
+            if ch == 0x03 || (ctrl && vk == 0x43) {
+                return Key::CtrlC;
+            }
+            if ctrl && vk == 0x44 {
+                return Key::CtrlD;
+            }
+            if ctrl && vk == 0x45 {
+                return Key::CtrlE;
+            }
+            if ctrl && vk == 0x46 {
+                return Key::CtrlF;
+            }
+            if ctrl && vk == 0x48 {
+                return Key::CtrlH;
+            }
+            if ctrl && vk == 0x4A {
+                return Key::CtrlJ;
+            }
+            if ctrl && vk == 0x4B {
+                return Key::CtrlK;
+            }
+            if ctrl && vk == 0x4C {
+                return Key::CtrlL;
+            }
+            if ctrl && vk == 0x4E {
+                return Key::CtrlN;
+            }
+            if ctrl && vk == 0x50 {
+                return Key::CtrlP;
+            }
+            if ctrl && vk == 0x51 {
+                return Key::CtrlQ;
+            }
+            if ctrl && vk == 0x56 {
+                return Key::CtrlV;
+            }
+            if ctrl && vk == 0x57 {
+                return Key::CtrlW;
+            }
+            if ctrl && vk == 0x58 {
+                return Key::CtrlX;
+            }
+            if ctrl && vk == 0x5A {
+                return Key::CtrlZ;
+            }
+            if ctrl && vk == 0x54 {
+                return Key::CtrlT;
+            }
+            if alt && vk == 0x48 {
+                return Key::AltH;
+            }
+            if alt && vk == 0x52 {
+                return Key::AltR;
+            }
+            if alt && vk == 0x56 {
+                return Key::AltV;
+            }
+            if alt && vk == 0x4D {
+                return Key::AltM;
+            }
 
             // Ctrl+Enter uses GetKeyState (real-time state) because
             // dwControlKeyState may not report Ctrl correctly in this context.
             if vk == 0x0D {
                 let ctrl_held = ctrl || (GetKeyState(0x11) as u16 & 0x8000 != 0);
-                if ctrl_held { return Key::CtrlEnter; }
+                if ctrl_held {
+                    return Key::CtrlEnter;
+                }
                 return Key::Enter;
             }
 
@@ -381,10 +531,10 @@ pub fn read_key() -> Key {
             // sequences as character records instead of VK records: reassemble
             // ESC O P (F1), ESC[11~ (F1), arrows, etc. from those characters.
             let pending = VT_PENDING.swap(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
-            if pending != VT_PENDING_NONE {
-                if let Some(key) = vt_feed(pending) {
-                    return key;
-                }
+            if pending != VT_PENDING_NONE
+                && let Some(key) = vt_feed(pending)
+            {
+                return key;
             }
             if let Some(key) = vt_feed(ch) {
                 return key;
@@ -406,17 +556,17 @@ const VT_PENDING_NONE: u16 = 0xFFFF;
 // Character constants for the VT pattern matches below.
 const K_ESC: u16 = 0x1B;
 const K_LBRACKET: u16 = 0x5B; // '['
-const K_O: u16 = 0x4F;        // 'O'
-const K_TILDE: u16 = 0x7E;    // '~'
-const K_A: u16 = 0x41;        // 'A'
-const K_B: u16 = 0x42;        // 'B'
-const K_C: u16 = 0x43;        // 'C'
-const K_D: u16 = 0x44;        // 'D'
-const K_H: u16 = 0x48;        // 'H'
-const K_F: u16 = 0x46;        // 'F'
-const K_P: u16 = 0x50;        // 'P'
-const K_ZERO: u16 = 0x30;     // '0'
-const K_NINE: u16 = 0x39;     // '9'
+const K_O: u16 = 0x4F; // 'O'
+const K_TILDE: u16 = 0x7E; // '~'
+const K_A: u16 = 0x41; // 'A'
+const K_B: u16 = 0x42; // 'B'
+const K_C: u16 = 0x43; // 'C'
+const K_D: u16 = 0x44; // 'D'
+const K_H: u16 = 0x48; // 'H'
+const K_F: u16 = 0x46; // 'F'
+const K_P: u16 = 0x50; // 'P'
+const K_ZERO: u16 = 0x30; // '0'
+const K_NINE: u16 = 0x39; // '9'
 const K_SEMICOLON: u16 = 0x3B; // ';'
 
 /// Feed one character from the input stream into the VT key reassembler.
@@ -511,8 +661,8 @@ fn vt_finish_csi(len: usize) -> Option<Key> {
     }
     let final_byte = VT_SEQ[len - 1].load(std::sync::atomic::Ordering::Relaxed);
     let mut params = String::new();
-    for i in 2..len - 1 {
-        if let Some(c) = char::from_u32(VT_SEQ[i].load(std::sync::atomic::Ordering::Relaxed) as u32) {
+    for entry in VT_SEQ.iter().take(len - 1).skip(2) {
+        if let Some(c) = char::from_u32(entry.load(std::sync::atomic::Ordering::Relaxed) as u32) {
             params.push(c);
         }
     }
@@ -526,9 +676,24 @@ fn vt_finish_csi(len: usize) -> Option<Key> {
             _ => None,
         },
         K_A => Some(arrow_with_mods(&params, Key::Up, Key::ShiftUp, Key::AltUp)),
-        K_B => Some(arrow_with_mods(&params, Key::Down, Key::ShiftDown, Key::AltDown)),
-        K_C => Some(arrow_with_mods(&params, Key::Right, Key::ShiftRight, Key::AltRight)),
-        K_D => Some(arrow_with_mods(&params, Key::Left, Key::ShiftLeft, Key::AltLeft)),
+        K_B => Some(arrow_with_mods(
+            &params,
+            Key::Down,
+            Key::ShiftDown,
+            Key::AltDown,
+        )),
+        K_C => Some(arrow_with_mods(
+            &params,
+            Key::Right,
+            Key::ShiftRight,
+            Key::AltRight,
+        )),
+        K_D => Some(arrow_with_mods(
+            &params,
+            Key::Left,
+            Key::ShiftLeft,
+            Key::AltLeft,
+        )),
         K_H => Some(Key::Home),
         K_F => Some(Key::End),
         _ => None,
@@ -635,7 +800,11 @@ mod tests {
         event[4..8].copy_from_slice(&button.to_ne_bytes());
         event[8..12].copy_from_slice(&ctrl.to_ne_bytes());
         event[12..16].copy_from_slice(&flags.to_ne_bytes());
-        InputRecord { event_type: MOUSE_EVENT_TYPE, _pad: 0, event }
+        InputRecord {
+            event_type: MOUSE_EVENT_TYPE,
+            _pad: 0,
+            event,
+        }
     }
 
     /// A KEY_EVENT_RECORD carrying one character (ConPTY-style VT input).
@@ -645,17 +814,47 @@ mod tests {
         event[6..8].copy_from_slice(&0u16.to_ne_bytes()); // wVK = 0
         event[10..12].copy_from_slice(&ch.to_ne_bytes()); // uChar
         event[12..16].copy_from_slice(&0u32.to_ne_bytes()); // dwControlKeyState
-        InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event }
+        InputRecord {
+            event_type: KEY_EVENT_TYPE,
+            _pad: 0,
+            event,
+        }
     }
 
     fn vt_seqs() -> Vec<(Vec<u16>, Key)> {
         vec![
             (vec![0x1B, b'O' as u16, b'P' as u16], Key::F1),
-            (vec![0x1B, b'[' as u16, b'1' as u16, b'1' as u16, b'~' as u16], Key::F1),
+            (
+                vec![0x1B, b'[' as u16, b'1' as u16, b'1' as u16, b'~' as u16],
+                Key::F1,
+            ),
             (vec![0x1B, b'[' as u16, b'A' as u16], Key::Up),
-            (vec![0x1B, b'[' as u16, b'1' as u16, b';' as u16, b'2' as u16, b'A' as u16], Key::ShiftUp),
-            (vec![0x1B, b'[' as u16, b'1' as u16, b';' as u16, b'3' as u16, b'D' as u16], Key::AltLeft),
-            (vec![0x1B, b'[' as u16, b'5' as u16, b'~' as u16], Key::PageUp),
+            (
+                vec![
+                    0x1B,
+                    b'[' as u16,
+                    b'1' as u16,
+                    b';' as u16,
+                    b'2' as u16,
+                    b'A' as u16,
+                ],
+                Key::ShiftUp,
+            ),
+            (
+                vec![
+                    0x1B,
+                    b'[' as u16,
+                    b'1' as u16,
+                    b';' as u16,
+                    b'3' as u16,
+                    b'D' as u16,
+                ],
+                Key::AltLeft,
+            ),
+            (
+                vec![0x1B, b'[' as u16, b'5' as u16, b'~' as u16],
+                Key::PageUp,
+            ),
             (vec![0x1B, b'[' as u16, b'F' as u16], Key::End),
             (vec![0x1B, b'O' as u16, b'A' as u16], Key::Up),
         ]
@@ -669,9 +868,12 @@ mod tests {
             for (i, &ch) in seq.iter().enumerate() {
                 let key = vt_feed(ch);
                 if i + 1 == seq.len() {
-                    assert_eq!(key, Some(expected), "seq {:?} must end on {expected:?}", seq);
+                    assert_eq!(key, Some(expected), "seq {seq:?} must end on {expected:?}");
                 } else {
-                    assert!(key.is_none(), "seq {:?} must not complete early ({key:?})", seq);
+                    assert!(
+                        key.is_none(),
+                        "seq {seq:?} must not complete early ({key:?})"
+                    );
                 }
             }
         }
@@ -686,7 +888,10 @@ mod tests {
         // A lone ESC is delivered as Escape; the next char is fed back.
         assert_eq!(vt_feed(0x1B), None);
         assert_eq!(vt_feed(b'x' as u16), Some(Key::Escape));
-        assert_eq!(VT_PENDING.load(std::sync::atomic::Ordering::Relaxed), b'x' as u16);
+        assert_eq!(
+            VT_PENDING.load(std::sync::atomic::Ordering::Relaxed),
+            b'x' as u16
+        );
         VT_PENDING.store(VT_PENDING_NONE, std::sync::atomic::Ordering::Relaxed);
         // And throws away unknown control bytes.
         assert_eq!(vt_feed(0x01), None);
@@ -695,7 +900,9 @@ mod tests {
     #[test]
     fn decode_mouse_left_press() {
         let rec = mouse_record(5, 3, FROM_LEFT_1ST_BUTTON_PRESSED, 0, 0);
-        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!("expected mouse") };
+        let Key::Mouse(ev) = decode_mouse(&rec) else {
+            panic!("expected mouse")
+        };
         assert_eq!(ev.x, 6); // 1-based
         assert_eq!(ev.y, 4);
         assert_eq!(ev.kind, MouseAction::Press);
@@ -706,18 +913,24 @@ mod tests {
     fn decode_mouse_release_and_wheel() {
         // Move with no button -> release-like Move event.
         let rec = mouse_record(2, 2, 0, 0, MOUSE_MOVED);
-        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        let Key::Mouse(ev) = decode_mouse(&rec) else {
+            panic!()
+        };
         assert_eq!(ev.kind, MouseAction::Move);
 
         // Wheel up: MOUSE_WHEELED with a positive signed delta in the high word.
         let rec = mouse_record(2, 2, 1 << 16, 0, MOUSE_WHEELED);
-        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        let Key::Mouse(ev) = decode_mouse(&rec) else {
+            panic!()
+        };
         assert_eq!(ev.kind, MouseAction::Press);
         assert_eq!(ev.button, MouseButton::WheelUp);
 
         // No button, no flags (a button just released).
         let rec = mouse_record(2, 2, 0, 0, 0);
-        let Key::Mouse(ev) = decode_mouse(&rec) else { panic!() };
+        let Key::Mouse(ev) = decode_mouse(&rec) else {
+            panic!()
+        };
         assert_eq!(ev.kind, MouseAction::Release);
     }
 
@@ -726,7 +939,11 @@ mod tests {
         let mut event = [0u8; 16];
         event[0..4].copy_from_slice(&1i32.to_ne_bytes()); // key down
         event[10..12].copy_from_slice(&('a' as u16).to_ne_bytes());
-        let rec = InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event };
+        let rec = InputRecord {
+            event_type: KEY_EVENT_TYPE,
+            _pad: 0,
+            event,
+        };
         assert!(!is_mouse(&rec));
         assert!(is_key_down(&rec));
     }
@@ -767,10 +984,7 @@ mod tests {
             }
             // Ctrl+Numpad1..4 arrive as KEY_EVENT_RECORDs with VK_NUMPADn
             // (0x61..0x64) and the Ctrl modifier bit set.
-            let recs = [
-                vk_record(0x61, LEFT_CTRL),
-                vk_record(0x64, LEFT_CTRL),
-            ];
+            let recs = [vk_record(0x61, LEFT_CTRL), vk_record(0x64, LEFT_CTRL)];
             let mut written: Dword = 0;
             if WriteConsoleInputW(hin, recs.as_ptr(), 2, &mut written) == 0 || written != 2 {
                 return;
@@ -784,9 +998,13 @@ mod tests {
     fn vk_record(vk: u16, ctrl: u32) -> InputRecord {
         let mut event = [0u8; 16];
         event[0..4].copy_from_slice(&1i32.to_ne_bytes()); // bKeyDown = 1
-        event[6..8].copy_from_slice(&vk.to_ne_bytes());   // wVK
+        event[6..8].copy_from_slice(&vk.to_ne_bytes()); // wVK
         event[10..12].copy_from_slice(&('1' as u16).to_ne_bytes()); // uChar
         event[12..16].copy_from_slice(&ctrl.to_ne_bytes()); // dwControlKeyState
-        InputRecord { event_type: KEY_EVENT_TYPE, _pad: 0, event }
+        InputRecord {
+            event_type: KEY_EVENT_TYPE,
+            _pad: 0,
+            event,
+        }
     }
 }

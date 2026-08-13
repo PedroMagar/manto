@@ -16,20 +16,20 @@ pub enum CommandStatus {
 }
 
 const BUILTINS_HELP: &[(&str, &str)] = &[
-    ("cd <path>",        "Change the current directory"),
-    ("pwd",              "Print the current working directory"),
-    ("clear",            "Clear the terminal screen"),
-    ("help",             "Show this help message"),
-    ("exit",             "Close the focused terminal window"),
+    ("cd <path>", "Change the current directory"),
+    ("pwd", "Print the current working directory"),
+    ("clear", "Clear the terminal screen"),
+    ("help", "Show this help message"),
+    ("exit", "Close the focused terminal window"),
 ];
 
 pub struct CommandEntry {
-    pub command:      String,
-    pub cwd:          String,
+    pub command: String,
+    pub cwd: String,
     pub output_lines: Vec<String>,
-    pub status:       CommandStatus,
-    kind:             CommandKind,
-    runner:           Option<OneShot>,
+    pub status: CommandStatus,
+    kind: CommandKind,
+    runner: Option<OneShot>,
 }
 
 impl Clone for CommandEntry {
@@ -107,7 +107,7 @@ impl CommandEntry {
             "help" => {
                 let mut lines = vec!["Built-in commands:".to_string()];
                 for (cmd, desc) in BUILTINS_HELP {
-                    lines.push(format!("  {:20} {}", cmd, desc));
+                    lines.push(format!("  {cmd:20} {desc}"));
                 }
                 lines
             }
@@ -119,8 +119,7 @@ impl CommandEntry {
     /// Check if this is a builtin exit command.
     #[allow(dead_code)]
     pub fn is_exit(&self) -> bool {
-        self.kind == CommandKind::Builtin
-            && self.command.trim().split_whitespace().next() == Some("exit")
+        self.kind == CommandKind::Builtin && self.command.split_whitespace().next() == Some("exit")
     }
 
     /// Advance one tick. Returns true if anything changed.
@@ -143,7 +142,7 @@ impl CommandEntry {
             if self.output_lines.is_empty() {
                 self.output_lines.push(match exit_code.unwrap_or_default() {
                     0 => "complete".to_string(),
-                    code => format!("exit {}", code),
+                    code => format!("exit {code}"),
                 });
             }
             self.status = CommandStatus::Complete;
@@ -165,8 +164,7 @@ impl CommandEntry {
 
     /// Check if this is a running external command that can be killed.
     pub fn is_running_external(&self) -> bool {
-        matches!(self.status, CommandStatus::Running)
-            && matches!(self.kind, CommandKind::External)
+        matches!(self.status, CommandStatus::Running) && matches!(self.kind, CommandKind::External)
     }
 }
 
@@ -180,7 +178,10 @@ impl CommandEntry {
         Self {
             cwd: String::new(),
             command: command.to_string(),
-            output_lines: output_lines.iter().map(|line| (*line).to_string()).collect(),
+            output_lines: output_lines
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect(),
             status,
             kind: CommandKind::External,
             runner: None,
@@ -196,8 +197,8 @@ enum RunnerUpdate {
 }
 
 struct OneShot {
-    child:          Option<Child>,
-    receiver:       Receiver<RunnerUpdate>,
+    child: Option<Child>,
+    receiver: Receiver<RunnerUpdate>,
     closed_streams: usize,
 }
 
@@ -240,7 +241,9 @@ fn read_lossy_lines<R: Read>(mut reader: R, tx: &mpsc::Sender<RunnerUpdate>) {
     let mut residue = String::new();
     loop {
         let n = reader.read(&mut buf).unwrap_or(0);
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         residue.push_str(&String::from_utf8_lossy(&buf[..n]));
         while let Some(pos) = residue.find('\n') {
             let line: String = residue.drain(..=pos).collect();
@@ -275,7 +278,11 @@ impl OneShot {
             });
         }
 
-        Ok(Self { child: Some(child), receiver: rx, closed_streams: 0 })
+        Ok(Self {
+            child: Some(child),
+            receiver: rx,
+            closed_streams: 0,
+        })
     }
 
     fn poll(&mut self) -> (Vec<String>, Option<i32>, bool) {
@@ -291,7 +298,9 @@ impl OneShot {
                 }
             }
         }
-        let exit_code = self.child.as_mut()
+        let exit_code = self
+            .child
+            .as_mut()
             .and_then(|c| c.try_wait().ok().flatten())
             .map(|s| s.code().unwrap_or_default());
         let closed = self.closed_streams >= 2 && exit_code.is_some();
@@ -315,10 +324,12 @@ impl Drop for OneShot {
     }
 }
 
-pub fn tick_all(commands: &mut Vec<CommandEntry>) -> bool {
+pub fn tick_all(commands: &mut [CommandEntry]) -> bool {
     let mut changed = false;
     for e in commands.iter_mut() {
-        if e.tick() { changed = true; }
+        if e.tick() {
+            changed = true;
+        }
     }
     changed
 }
@@ -382,13 +393,15 @@ mod tests {
             }
         }
         assert_eq!(lines.len(), 2, "expected two lines, got {lines:?}");
-        assert!(lines[0].contains("ab"), "first line should contain ab: {lines:?}");
+        assert!(
+            lines[0].contains("ab"),
+            "first line should contain ab: {lines:?}"
+        );
         assert_eq!(lines[1], "cd");
     }
 
     #[test]
-    fn unicode_command_preserves_accents_through_oneshot() {
-        // Check that "ç/ã" reach the command and come back in the output (UTF-8).
+    fn unicode_command_survives_the_oneshot_round_trip() {
         let cwd = std::env::current_dir().unwrap();
         let cwd = cwd.to_string_lossy().to_string();
         let mut cmd = CommandEntry::spawn("echo manto_çã_ñ", &cwd);
@@ -403,6 +416,15 @@ mod tests {
         }
 
         let joined = cmd.output_lines.join("\n");
-        assert!(joined.contains("manto"), "missing output: {joined:?}");
+        // Unix pipes are UTF-8 end to end; PowerShell 5.1 encodes piped
+        // output in the OEM codepage, so on Windows only the ASCII part is
+        // guaranteed to survive.
+        #[cfg(unix)]
+        assert!(
+            joined.contains("manto_çã_ñ"),
+            "accents must survive the round-trip: {joined:?}"
+        );
+        #[cfg(windows)]
+        assert!(joined.contains("manto_"), "missing output: {joined:?}");
     }
 }

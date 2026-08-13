@@ -15,17 +15,17 @@ use crate::menu::{MenuItem, MenuState};
 use crate::ui::window::Window;
 
 pub struct Application {
-    pub title:    String,
-    pub display:  DisplayMode,
-    pub desktop:  usize,
+    pub title: String,
+    pub display: DisplayMode,
+    pub desktop: usize,
     /// Menu windows close when they lose focus.
-    pub is_menu:  bool,
+    pub is_menu: bool,
     /// Present in terminal windows; absent in plain windows.
     pub terminal: Option<TerminalState>,
     /// Manifest entries shown when this is the start menu window.
-    pub menu:     Option<MenuState>,
+    pub menu: Option<MenuState>,
     /// Crib-sheet content shown when this is the help window.
-    pub help:     Option<HelpState>,
+    pub help: Option<HelpState>,
 }
 
 pub enum DisplayMode {
@@ -38,7 +38,15 @@ impl Application {
     /// Create a plain windowed app.
     #[allow(dead_code)]
     pub fn windowed(title: impl Into<String>, window: Window) -> Self {
-        Self { title: title.into(), display: DisplayMode::Windowed(window), desktop: 1, is_menu: false, terminal: None, menu: None, help: None }
+        Self {
+            title: title.into(),
+            display: DisplayMode::Windowed(window),
+            desktop: 1,
+            is_menu: false,
+            terminal: None,
+            menu: None,
+            help: None,
+        }
     }
 
     /// Create the start menu window carrying its manifest entries.
@@ -69,27 +77,32 @@ impl Application {
 
     /// Create a terminal window with preloaded command history and a
     /// persistent shell session.
-    pub fn terminal_window(title: impl Into<String>, window: Window, path: String, commands: Vec<CommandEntry>) -> Self {
+    pub fn terminal_window(
+        title: impl Into<String>,
+        window: Window,
+        path: String,
+        commands: Vec<CommandEntry>,
+    ) -> Self {
         match TerminalState::with_shell(path.clone(), commands.clone()) {
             Ok(ts) => Self {
-                title:    title.into(),
-                display:  DisplayMode::Windowed(window),
-                desktop:  1,
-                is_menu:  false,
+                title: title.into(),
+                display: DisplayMode::Windowed(window),
+                desktop: 1,
+                is_menu: false,
                 terminal: Some(ts),
-                menu:     None,
-                help:     None,
+                menu: None,
+                help: None,
             },
             Err(_) => {
                 // Fallback to non-session mode if shell spawn fails
                 Self {
-                    title:    title.into(),
-                    display:  DisplayMode::Windowed(window),
-                    desktop:  1,
-                    is_menu:  false,
+                    title: title.into(),
+                    display: DisplayMode::Windowed(window),
+                    desktop: 1,
+                    is_menu: false,
                     terminal: Some(TerminalState::new(path, commands)),
-                    menu:     None,
-                    help:     None,
+                    menu: None,
+                    help: None,
                 }
             }
         }
@@ -106,22 +119,22 @@ impl Application {
     ) -> Self {
         match TerminalState::with_program(path.clone(), program) {
             Ok(ts) => Self {
-                title:    title.into(),
-                display:  DisplayMode::Windowed(window),
-                desktop:  1,
-                is_menu:  false,
+                title: title.into(),
+                display: DisplayMode::Windowed(window),
+                desktop: 1,
+                is_menu: false,
                 terminal: Some(ts),
-                menu:     None,
-                help:     None,
+                menu: None,
+                help: None,
             },
             Err(_) => Self {
-                title:    title.into(),
-                display:  DisplayMode::Windowed(window),
-                desktop:  1,
-                is_menu:  false,
+                title: title.into(),
+                display: DisplayMode::Windowed(window),
+                desktop: 1,
+                is_menu: false,
                 terminal: Some(TerminalState::new(path, Vec::new())),
-                menu:     None,
-                help:     None,
+                menu: None,
+                help: None,
             },
         }
     }
@@ -137,7 +150,7 @@ impl Application {
 
     pub fn window(&self) -> Option<&Window> {
         match &self.display {
-            DisplayMode::Windowed(w)                  => Some(w),
+            DisplayMode::Windowed(w) => Some(w),
             DisplayMode::Maximized { display: w, .. } => Some(w),
             _ => None,
         }
@@ -152,7 +165,7 @@ impl Application {
 
     pub fn window_mut(&mut self) -> Option<&mut Window> {
         match &mut self.display {
-            DisplayMode::Windowed(w)                  => Some(w),
+            DisplayMode::Windowed(w) => Some(w),
             DisplayMode::Maximized { display: w, .. } => Some(w),
             _ => None,
         }
@@ -167,7 +180,10 @@ impl Application {
     }
 
     pub fn minimize(&mut self) {
-        let old = mem::replace(&mut self.display, DisplayMode::Minimized(Window::new(0, 0, 1, 1, 0)));
+        let old = mem::replace(
+            &mut self.display,
+            DisplayMode::Minimized(Window::new(0, 0, 1, 1, 0)),
+        );
         self.display = match old {
             DisplayMode::Windowed(w) => DisplayMode::Minimized(w),
             other => other,
@@ -175,7 +191,10 @@ impl Application {
     }
 
     pub fn restore(&mut self) {
-        let old = mem::replace(&mut self.display, DisplayMode::Windowed(Window::new(0, 0, 1, 1, 0)));
+        let old = mem::replace(
+            &mut self.display,
+            DisplayMode::Windowed(Window::new(0, 0, 1, 1, 0)),
+        );
         self.display = match old {
             DisplayMode::Minimized(w) => DisplayMode::Windowed(w),
             other => other,
@@ -185,11 +204,15 @@ impl Application {
     /// Maximize the window to fill the usable screen area, preserving the
     /// original geometry for restore.
     pub fn maximize(&mut self, screen_w: u16, screen_h: u16) {
-        let old = mem::replace(&mut self.display, DisplayMode::Minimized(Window::new(0, 0, 1, 1, 0)));
+        let old = mem::replace(
+            &mut self.display,
+            DisplayMode::Minimized(Window::new(0, 0, 1, 1, 0)),
+        );
         self.display = match old {
             DisplayMode::Windowed(w) => DisplayMode::Maximized {
                 display: Window::new(
-                    2, 1,
+                    2,
+                    1,
                     screen_w.saturating_sub(5),
                     screen_h.saturating_sub(4),
                     w.layer,
@@ -201,14 +224,23 @@ impl Application {
     }
 
     pub fn restore_maximize(&mut self) {
-        let old = mem::replace(&mut self.display, DisplayMode::Windowed(Window::new(0, 0, 1, 1, 0)));
+        let old = mem::replace(
+            &mut self.display,
+            DisplayMode::Windowed(Window::new(0, 0, 1, 1, 0)),
+        );
         self.display = match old {
             DisplayMode::Maximized { saved, .. } => DisplayMode::Windowed(saved),
             other => other,
         };
     }
 
-    pub fn set_window_geometry(&mut self, position_x: u16, position_y: u16, width: u16, height: u16) {
+    pub fn set_window_geometry(
+        &mut self,
+        position_x: u16,
+        position_y: u16,
+        width: u16,
+        height: u16,
+    ) {
         let template = match &self.display {
             DisplayMode::Windowed(w) => Some(w),
             DisplayMode::Maximized { display, .. } => Some(display),

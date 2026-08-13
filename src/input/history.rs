@@ -1,4 +1,4 @@
-use std::fs::{OpenOptions, File};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -13,13 +13,17 @@ impl History {
                 if let Some(appdata) = std::env::var_os("APPDATA") {
                     PathBuf::from(appdata).join("manto").join("history")
                 } else {
-                    home_dir().unwrap_or_else(|| PathBuf::from("."))
-                        .join(".manto").join("history")
+                    home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(".manto")
+                        .join("history")
                 }
             }
             (Some(xdg), false) => PathBuf::from(xdg).join("manto").join("history"),
-            (None, false) => home_dir().unwrap_or_else(|| PathBuf::from("."))
-                .join(".manto").join("history"),
+            (None, false) => home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".manto")
+                .join("history"),
         };
 
         Self { path }
@@ -33,9 +37,7 @@ impl History {
         };
 
         let reader = io::BufReader::new(file);
-        let total_lines: Vec<String> = reader.lines()
-            .filter_map(|l| l.ok())
-            .collect();
+        let total_lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
         let start = total_lines.len().saturating_sub(max_lines);
         total_lines.into_iter().skip(start).collect()
@@ -56,7 +58,7 @@ impl History {
             .append(true)
             .open(&self.path)
         {
-            let _ = writeln!(file, "{}", line);
+            let _ = writeln!(file, "{line}");
         }
     }
 }
@@ -93,7 +95,8 @@ mod tests {
 
     #[test]
     fn load_returns_existing_history() {
-        let tmp_dir = std::env::temp_dir().join(format!("manto-history-test-{}", std::process::id()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("manto-history-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp_dir);
         let _ = fs::create_dir_all(&tmp_dir);
 
@@ -105,7 +108,6 @@ mod tests {
             writeln!(file, "pwd").unwrap();
         }
 
-        // Override the path temporarily for testing
         let history = History { path: history_file };
         let loaded = history.load(100);
 
@@ -119,12 +121,15 @@ mod tests {
 
     #[test]
     fn append_creates_file_and_line() {
-        let tmp_dir = std::env::temp_dir().join(format!("manto-append-test-{}", std::process::id()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("manto-append-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp_dir);
         let _ = fs::create_dir_all(&tmp_dir);
 
         let history_file = tmp_dir.join("history");
-        let history = History { path: history_file.clone() };
+        let history = History {
+            path: history_file.clone(),
+        };
         history.append("test command");
 
         let loaded = fs::read_to_string(&history_file).unwrap();
@@ -135,12 +140,15 @@ mod tests {
 
     #[test]
     fn append_ignores_empty_lines() {
-        let tmp_dir = std::env::temp_dir().join(format!("manto-empty-test-{}", std::process::id()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("manto-append-empty-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp_dir);
         let _ = fs::create_dir_all(&tmp_dir);
 
         let history_file = tmp_dir.join("history");
-        let history = History { path: history_file.clone() };
+        let history = History {
+            path: history_file.clone(),
+        };
         history.append("   ");
         history.append("");
 

@@ -25,10 +25,19 @@ pub struct Window {
 impl Window {
     pub fn new(position_x: u16, position_y: u16, width: u16, height: u16, layer: u16) -> Self {
         Self {
-            position_x, position_y, width, height, layer,
-            minimizable: true, closable: true, draggable: true, resizable: true,
-            content_w: 0, content_h: 0,
-            scroll_x: 0, scroll_y: 0,
+            position_x,
+            position_y,
+            width,
+            height,
+            layer,
+            minimizable: true,
+            closable: true,
+            draggable: true,
+            resizable: true,
+            content_w: 0,
+            content_h: 0,
+            scroll_x: 0,
+            scroll_y: 0,
         }
     }
 
@@ -49,25 +58,41 @@ impl Window {
         self
     }
 
-    fn visible_w(&self) -> usize { self.width.saturating_sub(2) as usize }
-    fn visible_h(&self) -> usize { self.height.saturating_sub(2) as usize }
-    fn has_vscroll(&self) -> bool { self.content_h > 0 && self.content_h as usize > self.visible_h() }
-    fn has_hscroll(&self) -> bool { self.content_w > 0 && self.content_w as usize > self.visible_w() }
+    fn visible_w(&self) -> usize {
+        self.width.saturating_sub(2) as usize
+    }
+    fn visible_h(&self) -> usize {
+        self.height.saturating_sub(2) as usize
+    }
+    fn has_vscroll(&self) -> bool {
+        self.content_h > 0 && self.content_h as usize > self.visible_h()
+    }
+    fn has_hscroll(&self) -> bool {
+        self.content_w > 0 && self.content_w as usize > self.visible_w()
+    }
 
     /// Compute (thumb_pos, thumb_len) for a window scrollbar.
     /// `track` = track size = visible size.
     fn scroll_thumb(track: usize, total: usize, scroll: usize) -> (usize, usize) {
-        let thumb_len = (((track as f32 / total as f32) * track as f32).max(1.0) as usize)
-            .min(track);
+        let thumb_len =
+            (((track as f32 / total as f32) * track as f32).max(1.0) as usize).min(track);
         let available = track - thumb_len;
         let max_scroll = total - track;
-        let thumb_pos = if max_scroll > 0 { (scroll * available / max_scroll).min(available) } else { 0 };
+        let thumb_pos = if max_scroll > 0 {
+            (scroll * available / max_scroll).min(available)
+        } else {
+            0
+        };
         (thumb_pos, thumb_len)
     }
 
     /// Return the scrollbar character (░ or █) for position `i` within the track.
     fn scroll_char(thumb_pos: usize, thumb_len: usize, i: usize) -> char {
-        if i >= thumb_pos && i < thumb_pos + thumb_len { '█' } else { '░' }
+        if i >= thumb_pos && i < thumb_pos + thumb_len {
+            '█'
+        } else {
+            '░'
+        }
     }
 
     pub fn draw(&self, out: &mut impl Write, title: &str) {
@@ -107,7 +132,8 @@ impl Window {
         // Interior horizontal scrollbar: second-to-last row, lx+1 .. rx-1
         if self.has_hscroll() {
             let htrack = vw.saturating_sub(if self.has_vscroll() { 1 } else { 0 });
-            let (htp, htl) = Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
+            let (htp, htl) =
+                Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
             for i in 0..htrack {
                 ansi::move_to(out, lx + 1 + i as u16, by - 1);
                 write!(out, "{}", Self::scroll_char(htp, htl, i)).unwrap();
@@ -117,7 +143,8 @@ impl Window {
         // Interior vertical scrollbar: second-to-last column, ty+1 .. by-2 (or by-1 without hscroll)
         if self.has_vscroll() {
             let vtrack = vh.saturating_sub(if self.has_hscroll() { 1 } else { 0 });
-            let (vtp, vtl) = Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
+            let (vtp, vtl) =
+                Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
             for i in 0..vtrack {
                 ansi::move_to(out, rx - 1, ty + 1 + i as u16);
                 write!(out, "{}", Self::scroll_char(vtp, vtl, i)).unwrap();
@@ -131,32 +158,49 @@ impl Window {
         let rx = self.position_x + self.width - 1;
         let ty = self.position_y;
         let by = self.position_y + self.height - 1;
-        if x < lx || x > rx || y < ty || y > by { return None; }
+        if x < lx || x > rx || y < ty || y > by {
+            return None;
+        }
 
         if y == ty {
-            if x == lx { return Some(if self.minimizable { '-' } else { '┌' }); }
-            if x == rx { return Some(if self.closable   { 'x' } else { '┐' }); }
+            if x == lx {
+                return Some(if self.minimizable { '-' } else { '┌' });
+            }
+            if x == rx {
+                return Some(if self.closable { 'x' } else { '┐' });
+            }
             let bar = format!("{:─^1$}", format!(" {} ", title), (self.width - 2) as usize);
             return Some(bar.chars().nth((x - lx - 1) as usize).unwrap_or('─'));
         }
 
         if y == by {
-            if x == lx { return Some('└'); }
-            if x == rx { return Some('┘'); }
+            if x == lx {
+                return Some('└');
+            }
+            if x == rx {
+                return Some('┘');
+            }
             return Some('─');
         }
 
-        if x == rx { return Some('│'); }
-        if x == lx { return Some('│'); }
+        if x == rx {
+            return Some('│');
+        }
+        if x == lx {
+            return Some('│');
+        }
 
         // Interior: vertical scrollbar (second-to-last column, excluding the junction)
         let vw = self.visible_w();
         let vh = self.visible_h();
         let both = self.has_vscroll() && self.has_hscroll();
         if self.has_vscroll() && x == rx - 1 && y > ty && y < by {
-            if both && y == by - 1 { return Some(' '); }
+            if both && y == by - 1 {
+                return Some(' ');
+            }
             let vtrack = vh.saturating_sub(if both { 1 } else { 0 });
-            let (vtp, vtl) = Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
+            let (vtp, vtl) =
+                Self::scroll_thumb(vtrack, self.content_h as usize, self.scroll_y as usize);
             return Some(Self::scroll_char(vtp, vtl, (y - ty - 1) as usize));
         }
 
@@ -165,7 +209,8 @@ impl Window {
             let col = (x - lx - 1) as usize;
             let htrack = vw.saturating_sub(if both { 1 } else { 0 });
             if col < htrack {
-                let (htp, htl) = Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
+                let (htp, htl) =
+                    Self::scroll_thumb(htrack, self.content_w as usize, self.scroll_x as usize);
                 return Some(Self::scroll_char(htp, htl, col));
             }
         }
@@ -187,14 +232,15 @@ impl Window {
 
         // Interior vertical scrollbar: second-to-last column (excluding the junction)
         if self.has_vscroll() && x == rx - 1 && y > ty && y < by {
-            if both && y == by - 1 { return false; }
+            if both && y == by - 1 {
+                return false;
+            }
             let vtrack = vh.saturating_sub(if both { 1 } else { 0 });
             let mid = ty + 1 + (vtrack / 2) as u16;
             if y < mid {
                 self.scroll_y = self.scroll_y.saturating_sub(1);
             } else {
-                self.scroll_y = (self.scroll_y + 1)
-                    .min((self.content_h as usize - vtrack) as u16);
+                self.scroll_y = (self.scroll_y + 1).min((self.content_h as usize - vtrack) as u16);
             }
             return true;
         }
@@ -206,8 +252,7 @@ impl Window {
             if x < mid {
                 self.scroll_x = self.scroll_x.saturating_sub(1);
             } else {
-                self.scroll_x = (self.scroll_x + 1)
-                    .min((self.content_w as usize - htrack) as u16);
+                self.scroll_x = (self.scroll_x + 1).min((self.content_w as usize - htrack) as u16);
             }
             return true;
         }
@@ -222,10 +267,10 @@ impl Window {
             return;
         }
 
-        let orig_right_x  = self.position_x + self.width - 1;
+        let orig_right_x = self.position_x + self.width - 1;
         let orig_bottom_y = self.position_y + self.height - 1;
-        let new_right_x   = self.position_x + new_w - 1;
-        let new_bottom_y  = self.position_y + new_h - 1;
+        let new_right_x = self.position_x + new_w - 1;
+        let new_bottom_y = self.position_y + new_h - 1;
 
         if new_w > self.width {
             ansi::move_to(out, orig_right_x + 1, self.position_y);

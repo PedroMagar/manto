@@ -4,24 +4,26 @@
 use std::io::Write;
 use std::time::Duration;
 
-use super::terminal::{default_shell, is_interactive_app, split_interactive_flag};
 use super::Application;
-use crate::cmd::{tick_all, CommandEntry};
+use super::terminal::{default_shell, is_interactive_app, split_interactive_flag};
+use crate::cmd::{CommandEntry, tick_all};
 use crate::config::{Action, Config};
 use crate::input::{self, History};
 use crate::menu::{self, MenuItem, MenuKind};
 use crate::os::{self, Clock, Key, MouseAction, MouseButton, MouseEvent};
 use crate::ui::pointer::Pointer;
-use crate::ui::{compute_render_state, desktop_at, render, CMD_INPUT_X, STATUS_BAR_PREFIX,
-                STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX};
-use crate::wm::{self, apply_resize_edit, bring_window_to_front, close_active_window,
-                enter_active_resize_mode, focus_relative_window, max_tab_scroll,
-                minimize_active_window, move_active_window_to_desktop, normalize_host_path,
-                place_pointer_on_terminal_input, push_shell_command, resolve_snap_region,
-                snap_active_window, spawn_interactive_terminal, spawn_terminal_window,
-                split_active_terminal_window, sync_terminal_window_metrics, tab_layout,
-                toggle_active_maximize, toggle_help_window, toggle_start_menu, topmost_window_at,
-                Mode, ResizeEditState};
+use crate::ui::{
+    CMD_INPUT_X, STATUS_BAR_PREFIX, STATUS_START, STATUS_START_X, TERMINAL_INPUT_PREFIX,
+    compute_render_state, desktop_at, render,
+};
+use crate::wm::{
+    self, Mode, ResizeEditState, apply_resize_edit, bring_window_to_front, close_active_window,
+    enter_active_resize_mode, focus_relative_window, max_tab_scroll, minimize_active_window,
+    move_active_window_to_desktop, normalize_host_path, place_pointer_on_terminal_input,
+    push_shell_command, resolve_snap_region, snap_active_window, spawn_interactive_terminal,
+    spawn_terminal_window, split_active_terminal_window, sync_terminal_window_metrics, tab_layout,
+    toggle_active_maximize, toggle_help_window, toggle_start_menu, topmost_window_at,
+};
 
 /// Manhattan distance a left click must travel before it becomes a text
 /// selection drag, keeping plain clicks (and small jitters) free of a box.
@@ -93,9 +95,10 @@ impl Desktop {
             Vec::new()
         } else {
             let cwd = current_path.clone();
-            loaded_history.iter().map(|line| {
-                CommandEntry::completed(line, &cwd, vec![line.clone()])
-            }).collect()
+            loaded_history
+                .iter()
+                .map(|line| CommandEntry::completed(line, &cwd, vec![line.clone()]))
+                .collect()
         };
 
         // Restore the saved desktop layout (window geometry + active desktop).
@@ -106,8 +109,14 @@ impl Desktop {
             current_desktop = session.current_desktop.clamp(1, crate::ui::DESKTOP_COUNT);
             let mut next_id = 1usize;
             for saved in session.apps {
-                let w = saved.w.clamp(crate::ui::window::MIN_W, last_size.0.saturating_sub(2).max(5));
-                let h = saved.h.clamp(crate::ui::window::MIN_H, last_size.1.saturating_sub(4).max(3));
+                let w = saved.w.clamp(
+                    crate::ui::window::MIN_W,
+                    last_size.0.saturating_sub(2).max(5),
+                );
+                let h = saved.h.clamp(
+                    crate::ui::window::MIN_H,
+                    last_size.1.saturating_sub(4).max(3),
+                );
                 let x = saved.x.min(last_size.0.saturating_sub(w));
                 let y = saved.y.min(last_size.1.saturating_sub(h + 3));
                 let cwd = if crate::session::path_exists(&saved.path) {
@@ -118,10 +127,15 @@ impl Desktop {
                 let idx = crate::wm::spawn_terminal_window_at(
                     &mut applications,
                     &mut next_id,
-                    saved.desktop.clamp(1, crate::ui::DESKTOP_COUNT),
-                    x, y, w, h,
-                    &cwd,
-                    history_commands.clone(),
+                    crate::wm::TerminalSpawn {
+                        desktop: saved.desktop.clamp(1, crate::ui::DESKTOP_COUNT),
+                        x,
+                        y,
+                        w,
+                        h,
+                        path: cwd,
+                        commands: history_commands.clone(),
+                    },
                 );
                 if let Some(app) = applications.get_mut(idx) {
                     app.title = saved.title;
@@ -170,33 +184,46 @@ impl Desktop {
         sync_terminal_window_metrics(&mut self.applications);
         let (preview, cursor) = compute_render_state(&self.mode, &self.applications, &self.pointer);
         let in_shell = matches!(self.mode, Mode::Typing);
-        let shell_path = if in_shell { self.current_path.as_str() } else { "" };
+        let shell_path = if in_shell {
+            self.current_path.as_str()
+        } else {
+            ""
+        };
         let focused_term = if let Mode::TerminalFocus { app_idx } = &self.mode {
-            self.applications.get(*app_idx).and_then(|a| a.terminal.as_ref()).map(|t| (*app_idx, t.cmd_input.as_str(), t.input_cursor))
-        } else { None };
+            self.applications
+                .get(*app_idx)
+                .and_then(|a| a.terminal.as_ref())
+                .map(|t| (*app_idx, t.cmd_input.as_str(), t.input_cursor))
+        } else {
+            None
+        };
         let draw_pointer = self.draw_pointer();
-        render(
-            out,
-            &self.applications,
-            preview,
-            cursor,
-            self.last_size.0,
-            self.last_size.1,
-            &self.pointer,
-            self.scroll_offset,
-            self.tab_scroll,
-            shell_path,
-            if in_shell { Some((self.cmd_input.as_str(), self.cmd_cursor)) } else { None },
-            if in_shell { &self.commands } else { &[] },
-            self.panel_scroll,
-            self.current_desktop,
-            focused_term,
-            &mut self.screen,
-            self.sel.as_ref(),
-            self.config.theme,
-            self.full_redraw,
+        let mut frame = crate::ui::Frame {
+            applications: &self.applications,
+            resize_preview: preview,
+            cursor_interaction: cursor,
+            w: self.last_size.0,
+            h: self.last_size.1,
+            pointer: &self.pointer,
+            scroll_offset: self.scroll_offset,
+            tab_scroll: self.tab_scroll,
+            path: shell_path,
+            typing_input: if in_shell {
+                Some((self.cmd_input.as_str(), self.cmd_cursor))
+            } else {
+                None
+            },
+            commands: if in_shell { &self.commands } else { &[] },
+            panel_scroll: self.panel_scroll,
+            current_desktop: self.current_desktop,
+            focused_terminal: focused_term,
+            grid: &mut self.screen,
+            selection: self.sel.as_ref(),
+            theme: self.config.theme,
+            full_redraw: self.full_redraw,
             draw_pointer,
-        );
+        };
+        render(out, &mut frame);
         self.full_redraw = false;
     }
 
@@ -208,9 +235,11 @@ impl Desktop {
         match &self.mode {
             Mode::Typing => false,
             Mode::TerminalFocus { app_idx } => {
-                let interactive = self.applications.get(*app_idx)
+                let interactive = self
+                    .applications
+                    .get(*app_idx)
                     .and_then(|a| a.terminal.as_ref())
-                    .map_or(false, |t| t.interactive);
+                    .is_some_and(|t| t.interactive);
                 interactive && self.mouse_recent()
             }
             _ => true,
@@ -220,12 +249,18 @@ impl Desktop {
     /// True when the mouse was used within the last few seconds.
     fn mouse_recent(&self) -> bool {
         const IDLE: Duration = Duration::from_millis(3000);
-        self.last_mouse.as_ref().map(|t| t.elapsed() < IDLE).unwrap_or(false)
+        self.last_mouse
+            .as_ref()
+            .map(|t| t.elapsed() < IDLE)
+            .unwrap_or(false)
     }
 
     /// Extend the free screen selection in `dir`, seeded from the pointer.
     fn extend_screen_selection(&mut self, dir: (i32, i32)) {
-        let (w, h) = (self.last_size.0.max(1) as usize, self.last_size.1.max(1) as usize);
+        let (w, h) = (
+            self.last_size.0.max(1) as usize,
+            self.last_size.1.max(1) as usize,
+        );
         let pos = self.sel_pos.unwrap_or((self.pointer.x, self.pointer.y));
         let origin = match self.sel {
             Some(s) => s.anchor,
@@ -235,7 +270,10 @@ impl Desktop {
         r = (r + dir.1).clamp(0, (h - 1) as i32);
         c = (c + dir.0).clamp(0, (w - 1) as i32);
         self.sel_pos = Some((c as u16, r as u16));
-        self.sel = Some(crate::ui::screen::BoxSelect { anchor: origin, extent: (r as usize, c as usize) });
+        self.sel = Some(crate::ui::screen::BoxSelect {
+            anchor: origin,
+            extent: (r as usize, c as usize),
+        });
     }
 
     /// Copy the free screen selection (the visible box under selection) to the
@@ -254,7 +292,11 @@ impl Desktop {
     /// Read clipboard text: OS clipboard first, Manto in-memory fallback.
     fn read_clipboard(&self) -> Option<String> {
         crate::os::clipboard_get().or_else(|| {
-            if self.clipboard.is_empty() { None } else { Some(self.clipboard.clone()) }
+            if self.clipboard.is_empty() {
+                None
+            } else {
+                Some(self.clipboard.clone())
+            }
         })
     }
 
@@ -280,10 +322,18 @@ impl Desktop {
         if matches!(&self.mode, Mode::Normal) {
             let sb_x = self.last_size.0.saturating_sub(1);
             if self.pointer.x == sb_x {
-                let minimized_count = self.applications.iter()
+                let minimized_count = self
+                    .applications
+                    .iter()
                     .filter(|a| a.on_desktop(self.current_desktop) && a.is_minimized())
                     .count();
-                let tab_count = tab_layout(&self.applications, self.current_desktop, self.last_size.1, self.tab_scroll).len();
+                let tab_count = tab_layout(
+                    &self.applications,
+                    self.current_desktop,
+                    self.last_size.1,
+                    self.tab_scroll,
+                )
+                .len();
                 if minimized_count <= tab_count {
                     self.pointer.x = sb_x.saturating_sub(1);
                 } else {
@@ -311,9 +361,10 @@ impl Desktop {
     /// anything changed (a redraw is needed).
     pub fn tick(&mut self) -> bool {
         tick_all(&mut self.commands)
-            || self.applications.iter_mut().any(|a| {
-                a.terminal.as_mut().map_or(false, |t| t.tick())
-            })
+            || self
+                .applications
+                .iter_mut()
+                .any(|a| a.terminal.as_mut().is_some_and(|t| t.tick()))
     }
 
     /// Per-second housekeeping: tab title marquee, host terminal resize, and
@@ -330,19 +381,29 @@ impl Desktop {
             if self.sel.is_some() {
                 self.sel = None; // geometry changed: drop the stale box
             }
-            self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
-            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            self.pointer
+                .clamp_to_bounds(self.last_size.0, self.last_size.1);
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                &self.applications,
+                self.current_desktop,
+                self.last_size.1,
+            ));
         }
         let tab_x = self.last_size.0.saturating_sub(3);
-        let needs_scroll = tab_layout(&self.applications, self.current_desktop, self.last_size.1, self.tab_scroll)
-            .iter()
-            .any(|&(idx, tab_y, tab_h)| {
-                let is_hovered = self.pointer.x >= tab_x
-                    && self.pointer.y >= tab_y
-                    && self.pointer.y < tab_y + tab_h;
-                is_hovered
-                    && self.applications[idx].title.chars().count() > tab_h.saturating_sub(2) as usize
-            });
+        let needs_scroll = tab_layout(
+            &self.applications,
+            self.current_desktop,
+            self.last_size.1,
+            self.tab_scroll,
+        )
+        .iter()
+        .any(|&(idx, tab_y, tab_h)| {
+            let is_hovered = self.pointer.x >= tab_x
+                && self.pointer.y >= tab_y
+                && self.pointer.y < tab_y + tab_h;
+            is_hovered
+                && self.applications[idx].title.chars().count() > tab_h.saturating_sub(2) as usize
+        });
         size_changed || needs_scroll
     }
 
@@ -360,9 +421,11 @@ impl Desktop {
         // Esc/End -> desktop, Ctrl+Delete -> quit handled in step_input).
         if let Mode::TerminalFocus { app_idx } = &self.mode {
             let app_idx = *app_idx;
-            if self.applications.get(app_idx)
+            if self
+                .applications
+                .get(app_idx)
                 .and_then(|a| a.terminal.as_ref())
-                .map_or(false, |t| t.interactive)
+                .is_some_and(|t| t.interactive)
             {
                 return self.key_interactive(app_idx, key);
             }
@@ -401,22 +464,50 @@ impl Desktop {
 
         match key {
             Key::Ctrl1 => {
-                if move_active_window_to_desktop(&mut self.applications, &mut self.mode, &mut self.current_desktop, 1, self.last_size.1, &mut self.tab_scroll) {
+                if move_active_window_to_desktop(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.current_desktop,
+                    1,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                ) {
                     mode_changed = true;
                 }
             }
             Key::Ctrl2 => {
-                if move_active_window_to_desktop(&mut self.applications, &mut self.mode, &mut self.current_desktop, 2, self.last_size.1, &mut self.tab_scroll) {
+                if move_active_window_to_desktop(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.current_desktop,
+                    2,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                ) {
                     mode_changed = true;
                 }
             }
             Key::Ctrl3 => {
-                if move_active_window_to_desktop(&mut self.applications, &mut self.mode, &mut self.current_desktop, 3, self.last_size.1, &mut self.tab_scroll) {
+                if move_active_window_to_desktop(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.current_desktop,
+                    3,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                ) {
                     mode_changed = true;
                 }
             }
             Key::Ctrl4 => {
-                if move_active_window_to_desktop(&mut self.applications, &mut self.mode, &mut self.current_desktop, 4, self.last_size.1, &mut self.tab_scroll) {
+                if move_active_window_to_desktop(
+                    &mut self.applications,
+                    &mut self.mode,
+                    &mut self.current_desktop,
+                    4,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                ) {
                     mode_changed = true;
                 }
             }
@@ -430,23 +521,25 @@ impl Desktop {
                     Mode::TerminalFocus { app_idx } => Some(*app_idx),
                     _ => None,
                 };
-                if let Some(idx) = focused_idx {
-                    if let Some(t) = self.applications[idx].terminal.as_mut() {
-                        if let Some(ref mut session) = t.shell_session {
-                            // Forward ^C to the live shell session.
-                            session.write(&[3]);
-                            mode_changed = true;
-                        } else {
-                            // Fallback: interrupt a running one-shot command.
-                            for cmd in t.commands.iter_mut().rev() {
-                                if cmd.is_running_external() {
-                                    cmd.kill();
-                                    t.commands.push(CommandEntry::completed(
-                                        "^C", &t.path, vec!["".to_string()],
-                                    ));
-                                    mode_changed = true;
-                                    break;
-                                }
+                if let Some(idx) = focused_idx
+                    && let Some(t) = self.applications[idx].terminal.as_mut()
+                {
+                    if let Some(ref mut session) = t.shell_session {
+                        // Forward ^C to the live shell session.
+                        session.write(&[3]);
+                        mode_changed = true;
+                    } else {
+                        // Fallback: interrupt a running one-shot command.
+                        for cmd in t.commands.iter_mut().rev() {
+                            if cmd.is_running_external() {
+                                cmd.kill();
+                                t.commands.push(CommandEntry::completed(
+                                    "^C",
+                                    &t.path,
+                                    vec!["".to_string()],
+                                ));
+                                mode_changed = true;
+                                break;
                             }
                         }
                     }
@@ -459,9 +552,14 @@ impl Desktop {
                 mode_changed = match kind {
                     ModeKind::Normal => self.key_normal(key),
                     ModeKind::Typing => self.key_typing(key),
-                    ModeKind::Moving => self.key_moving(key, app_idx.expect("Moving carries app_idx")),
-                    ModeKind::Resizing => self.key_resizing(key, app_idx.expect("Resizing carries app_idx")),
-                    ModeKind::TerminalFocus => self.key_terminal_focus(key, app_idx.expect("TerminalFocus carries app_idx")),
+                    ModeKind::Moving => {
+                        self.key_moving(key, app_idx.expect("Moving carries app_idx"))
+                    }
+                    ModeKind::Resizing => {
+                        self.key_resizing(key, app_idx.expect("Resizing carries app_idx"))
+                    }
+                    ModeKind::TerminalFocus => self
+                        .key_terminal_focus(key, app_idx.expect("TerminalFocus carries app_idx")),
                 };
             }
         }
@@ -492,23 +590,34 @@ impl Desktop {
                 mode_changed = true;
             }
             Key::AltUp | Key::AltDown | Key::AltLeft | Key::AltRight => {
-                if let Some(region) = resolve_snap_region(&key, os::held_arrow_keys()) {
-                    if snap_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.0, self.last_size.1, region) {
-                        mode_changed = true;
-                    }
+                if let Some(region) = resolve_snap_region(&key, os::held_arrow_keys())
+                    && snap_active_window(
+                        &mut self.applications,
+                        &mut self.mode,
+                        self.current_desktop,
+                        self.last_size.0,
+                        self.last_size.1,
+                        region,
+                    )
+                {
+                    mode_changed = true;
                 }
             }
             Key::Char(digit @ '1'..='4') => {
                 self.current_desktop = digit.to_digit(10).unwrap_or(1) as usize;
-                self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                    &self.applications,
+                    self.current_desktop,
+                    self.last_size.1,
+                ));
                 if !wm::mode_targets_desktop(&self.mode, &self.applications, self.current_desktop) {
                     self.mode = Mode::Normal;
                 }
                 mode_changed = true;
             }
-            Key::Up    => self.pointer.move_up(),
-            Key::Down  => self.pointer.move_down(self.last_size.1),
-            Key::Left  => self.pointer.move_left(),
+            Key::Up => self.pointer.move_up(),
+            Key::Down => self.pointer.move_down(self.last_size.1),
+            Key::Left => self.pointer.move_left(),
             Key::Right => self.pointer.move_right(self.last_size.0),
 
             Key::Home => {
@@ -540,14 +649,23 @@ impl Desktop {
     /// drag / resize / minimize / close). Shared by Space/Enter and the mouse.
     fn space_action(&mut self) -> bool {
         let mut mode_changed = false;
-        let sb_x   = self.last_size.0.saturating_sub(1);
+        let sb_x = self.last_size.0.saturating_sub(1);
         let sb_top = 1u16;
         let sb_bot = self.last_size.1.saturating_sub(4);
-        let tab_x  = self.last_size.0.saturating_sub(3);
+        let tab_x = self.last_size.0.saturating_sub(3);
 
-        if let Some(d) = desktop_at(self.pointer.x, self.pointer.y, self.last_size.0, self.last_size.1) {
+        if let Some(d) = desktop_at(
+            self.pointer.x,
+            self.pointer.y,
+            self.last_size.0,
+            self.last_size.1,
+        ) {
             self.current_desktop = d;
-            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                &self.applications,
+                self.current_desktop,
+                self.last_size.1,
+            ));
             if !wm::mode_targets_desktop(&self.mode, &self.applications, self.current_desktop) {
                 self.mode = Mode::Normal;
             }
@@ -564,7 +682,13 @@ impl Desktop {
                 && self.pointer.x >= STATUS_START_X
                 && self.pointer.x < start_end
             {
-                toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load());
+                toggle_start_menu(
+                    &mut self.applications,
+                    self.current_desktop,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                    menu::load(),
+                );
                 self.park_pointer_on_start_menu();
                 mode_changed = true;
             } else if self.pointer.x == sb_x {
@@ -573,50 +697,86 @@ impl Desktop {
                 if self.pointer.y <= mid {
                     self.tab_scroll = self.tab_scroll.saturating_sub(1);
                 } else {
-                    self.tab_scroll = (self.tab_scroll + 1)
-                        .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                    self.tab_scroll = (self.tab_scroll + 1).min(max_tab_scroll(
+                        &self.applications,
+                        self.current_desktop,
+                        self.last_size.1,
+                    ));
                 }
                 mode_changed = true;
             } else if self.pointer.x >= tab_x {
                 self.last_space_time = None;
-                let on_tab = tab_layout(&self.applications, self.current_desktop, self.last_size.1, self.tab_scroll)
-                    .into_iter()
-                    .find(|&(_, ty, th)| self.pointer.y >= ty && self.pointer.y < ty + th)
-                    .map(|(idx, _, _)| idx);
+                let on_tab = tab_layout(
+                    &self.applications,
+                    self.current_desktop,
+                    self.last_size.1,
+                    self.tab_scroll,
+                )
+                .into_iter()
+                .find(|&(_, ty, th)| self.pointer.y >= ty && self.pointer.y < ty + th)
+                .map(|(idx, _, _)| idx);
 
                 if let Some(app_idx) = on_tab {
                     self.applications[app_idx].restore();
                     let restored_idx = bring_window_to_front(&mut self.applications, app_idx);
-                    self.tab_scroll = self.tab_scroll
-                        .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                    self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                        &self.applications,
+                        self.current_desktop,
+                        self.last_size.1,
+                    ));
                     if self.applications[restored_idx].terminal.is_some() {
-                        place_pointer_on_terminal_input(&mut self.pointer, &self.applications, restored_idx, self.last_size.0, self.last_size.1);
-                        self.mode = Mode::TerminalFocus { app_idx: restored_idx };
+                        place_pointer_on_terminal_input(
+                            &mut self.pointer,
+                            &self.applications,
+                            restored_idx,
+                            self.last_size.0,
+                            self.last_size.1,
+                        );
+                        self.mode = Mode::TerminalFocus {
+                            app_idx: restored_idx,
+                        };
                     }
                     mode_changed = true;
                 }
-            } else if let Some(top_idx) =
-                topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
-            {
+            } else if let Some(top_idx) = topmost_window_at(
+                &self.applications,
+                self.current_desktop,
+                self.pointer.x,
+                self.pointer.y,
+            ) {
                 let mut skip = false;
-                if let Some(menu_idx) = self.applications.iter().position(|a| a.on_desktop(self.current_desktop) && a.is_menu) {
-                    if top_idx != menu_idx {
-                        self.applications.remove(menu_idx);
-                        self.tab_scroll = self.tab_scroll
-                            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
-                        mode_changed = true;
-                        skip = true;
-                    }
+                if let Some(menu_idx) = self
+                    .applications
+                    .iter()
+                    .position(|a| a.on_desktop(self.current_desktop) && a.is_menu)
+                    && top_idx != menu_idx
+                {
+                    self.applications.remove(menu_idx);
+                    self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                        &self.applications,
+                        self.current_desktop,
+                        self.last_size.1,
+                    ));
+                    mode_changed = true;
+                    skip = true;
                 }
                 // The help window closes when the click lands outside it.
                 // `topmost_window_at` is recomputed so indices stay valid
                 // after the menu removal above.
                 if let Some(help_idx) = self.help_idx() {
-                    let clicked = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y);
+                    let clicked = topmost_window_at(
+                        &self.applications,
+                        self.current_desktop,
+                        self.pointer.x,
+                        self.pointer.y,
+                    );
                     if clicked != Some(help_idx) {
                         self.applications.remove(help_idx);
-                        self.tab_scroll = self.tab_scroll
-                            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                        self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                            &self.applications,
+                            self.current_desktop,
+                            self.last_size.1,
+                        ));
                         mode_changed = true;
                         skip = true;
                     }
@@ -628,8 +788,17 @@ impl Desktop {
                         } else {
                             false
                         };
-                        handled || wm::interact_terminal_horizontal_scroll(app, self.pointer.x, self.pointer.y)
-                            || wm::interact_terminal_vertical_scroll(app, self.pointer.x, self.pointer.y)
+                        handled
+                            || wm::interact_terminal_horizontal_scroll(
+                                app,
+                                self.pointer.x,
+                                self.pointer.y,
+                            )
+                            || wm::interact_terminal_vertical_scroll(
+                                app,
+                                self.pointer.x,
+                                self.pointer.y,
+                            )
                     } else {
                         false
                     };
@@ -639,30 +808,55 @@ impl Desktop {
 
                     let is_terminal_input = {
                         let app = &self.applications[top_idx];
-                        app.terminal.is_some() && app.window().map_or(false, |win| {
-                            let has_hscroll = win.content_w as usize > win.width.saturating_sub(2) as usize;
-                            win.height >= 5
-                                && self.pointer.y == win.position_y + win.height.saturating_sub(if has_hscroll { 3 } else { 2 })
-                                && self.pointer.x > win.position_x
-                                && self.pointer.x < win.position_x + win.width - 1
-                        })
+                        app.terminal.is_some()
+                            && app.window().is_some_and(|win| {
+                                let has_hscroll =
+                                    win.content_w as usize > win.width.saturating_sub(2) as usize;
+                                win.height >= 5
+                                    && self.pointer.y
+                                        == win.position_y
+                                            + win.height.saturating_sub(if has_hscroll {
+                                                3
+                                            } else {
+                                                2
+                                            })
+                                    && self.pointer.x > win.position_x
+                                    && self.pointer.x < win.position_x + win.width - 1
+                            })
                     };
                     if is_terminal_input && !scroll_handled {
                         let final_idx = bring_window_to_front(&mut self.applications, top_idx);
                         // Interactive sessions keep the pointer where it
                         // was placed (it anchors the box selection).
                         let interactive = self.applications[final_idx]
-                            .terminal.as_ref().map_or(false, |t| t.interactive);
+                            .terminal
+                            .as_ref()
+                            .is_some_and(|t| t.interactive);
                         if !interactive {
-                            place_pointer_on_terminal_input(&mut self.pointer, &self.applications, final_idx, self.last_size.0, self.last_size.1);
+                            place_pointer_on_terminal_input(
+                                &mut self.pointer,
+                                &self.applications,
+                                final_idx,
+                                self.last_size.0,
+                                self.last_size.1,
+                            );
                         }
                         self.mode = Mode::TerminalFocus { app_idx: final_idx };
                         mode_changed = true;
                     }
 
                     if !scroll_handled && !is_terminal_input {
-                        let (is_minimize, is_close, is_resize, is_title, offset_x,
-                             win_minimizable, win_closable, win_draggable, win_resizable) = {
+                        let (
+                            is_minimize,
+                            is_close,
+                            is_resize,
+                            is_title,
+                            offset_x,
+                            win_minimizable,
+                            win_closable,
+                            win_draggable,
+                            win_resizable,
+                        ) = {
                             let win = self.applications[top_idx].window().unwrap();
                             let lx = win.position_x;
                             let rx = win.position_x + win.width - 1;
@@ -686,21 +880,28 @@ impl Desktop {
                             self.applications[top_idx].minimize();
                             mode_changed = true;
                         } else if is_close && win_closable {
-                            if let Some(t) = self.applications[top_idx].terminal.as_mut() {
-                                if let Some(mut session) = t.shell_session.take() {
-                                    session.kill();
-                                }
+                            if let Some(t) = self.applications[top_idx].terminal.as_mut()
+                                && let Some(mut session) = t.shell_session.take()
+                            {
+                                session.kill();
                             }
                             self.applications.remove(top_idx);
-                            self.tab_scroll = self.tab_scroll
-                                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+                            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                                &self.applications,
+                                self.current_desktop,
+                                self.last_size.1,
+                            ));
                             mode_changed = true;
                         } else if is_resize && !maximized && win_resizable {
-                            self.mode = Mode::Resizing { app_idx: top_idx, edit: None };
+                            self.mode = Mode::Resizing {
+                                app_idx: top_idx,
+                                edit: None,
+                            };
                             mode_changed = true;
                         } else if is_title && win_draggable {
                             let now = Clock::now();
-                            let is_double = self.last_space_time
+                            let is_double = self
+                                .last_space_time
                                 .as_ref()
                                 .map(|t| t.elapsed() < Duration::from_millis(300))
                                 .unwrap_or(false);
@@ -710,12 +911,17 @@ impl Desktop {
                                 if maximized {
                                     self.applications[top_idx].restore_maximize();
                                 } else {
-                                    self.applications[top_idx].maximize(self.last_size.0, self.last_size.1);
+                                    self.applications[top_idx]
+                                        .maximize(self.last_size.0, self.last_size.1);
                                 }
                                 mode_changed = true;
                             } else if !maximized {
-                                let final_idx = bring_window_to_front(&mut self.applications, top_idx);
-                                self.mode = Mode::Moving { app_idx: final_idx, offset_x };
+                                let final_idx =
+                                    bring_window_to_front(&mut self.applications, top_idx);
+                                self.mode = Mode::Moving {
+                                    app_idx: final_idx,
+                                    offset_x,
+                                };
                                 mode_changed = true;
                             }
                         } else {
@@ -746,21 +952,32 @@ impl Desktop {
                     &self.current_path,
                     history_commands,
                 );
-                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                place_pointer_on_terminal_input(
+                    &mut self.pointer,
+                    &self.applications,
+                    app_idx,
+                    self.last_size.0,
+                    self.last_size.1,
+                );
                 self.mode = Mode::TerminalFocus { app_idx };
                 true
             }
             Action::CloseWindow => {
-                if let Some(idx) = wm::active_window_idx(&self.applications, &self.mode, self.current_desktop) {
-                    if self.applications[idx].terminal.is_some() {
-                        if let Some(t) = self.applications[idx].terminal.as_mut() {
-                            if let Some(mut session) = t.shell_session.take() {
-                                session.kill();
-                            }
-                        }
-                    }
+                if let Some(idx) =
+                    wm::active_window_idx(&self.applications, &self.mode, self.current_desktop)
+                    && self.applications[idx].terminal.is_some()
+                    && let Some(t) = self.applications[idx].terminal.as_mut()
+                    && let Some(mut session) = t.shell_session.take()
+                {
+                    session.kill();
                 }
-                close_active_window(&mut self.applications, &mut self.mode, self.current_desktop, self.last_size.1, &mut self.tab_scroll)
+                close_active_window(
+                    &mut self.applications,
+                    &mut self.mode,
+                    self.current_desktop,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                )
             }
             Action::ToggleMaximize => toggle_active_maximize(
                 &mut self.applications,
@@ -770,7 +987,13 @@ impl Desktop {
                 self.last_size.1,
             ),
             Action::StartMenu => {
-                if toggle_start_menu(&mut self.applications, self.current_desktop, self.last_size.1, &mut self.tab_scroll, menu::load()) {
+                if toggle_start_menu(
+                    &mut self.applications,
+                    self.current_desktop,
+                    self.last_size.1,
+                    &mut self.tab_scroll,
+                    menu::load(),
+                ) {
                     self.park_pointer_on_start_menu();
                     true
                 } else {
@@ -792,7 +1015,13 @@ impl Desktop {
                     self.current_desktop,
                     wm::SplitDirection::Vertical,
                 ) {
-                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                    place_pointer_on_terminal_input(
+                        &mut self.pointer,
+                        &self.applications,
+                        app_idx,
+                        self.last_size.0,
+                        self.last_size.1,
+                    );
                     self.mode = Mode::TerminalFocus { app_idx };
                     true
                 } else {
@@ -807,7 +1036,13 @@ impl Desktop {
                     self.current_desktop,
                     wm::SplitDirection::Horizontal,
                 ) {
-                    place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                    place_pointer_on_terminal_input(
+                        &mut self.pointer,
+                        &self.applications,
+                        app_idx,
+                        self.last_size.0,
+                        self.last_size.1,
+                    );
                     self.mode = Mode::TerminalFocus { app_idx };
                     true
                 } else {
@@ -821,8 +1056,18 @@ impl Desktop {
                 self.last_size.1,
                 &mut self.tab_scroll,
             ),
-            Action::FocusNext => focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, false),
-            Action::FocusPrev => focus_relative_window(&mut self.applications, &mut self.mode, self.current_desktop, true),
+            Action::FocusNext => focus_relative_window(
+                &mut self.applications,
+                &mut self.mode,
+                self.current_desktop,
+                false,
+            ),
+            Action::FocusPrev => focus_relative_window(
+                &mut self.applications,
+                &mut self.mode,
+                self.current_desktop,
+                true,
+            ),
             Action::ResizeActive => enter_active_resize_mode(
                 &self.applications,
                 &mut self.mode,
@@ -852,7 +1097,8 @@ impl Desktop {
         let moved = self.pointer.x != sx || self.pointer.y != sy;
         self.pointer.x = sx;
         self.pointer.y = sy;
-        self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
+        self.pointer
+            .clamp_to_bounds(self.last_size.0, self.last_size.1);
 
         match ev.kind {
             MouseAction::Move | MouseAction::Drag => {
@@ -914,7 +1160,11 @@ impl Desktop {
                 if was_dragging {
                     if let Mode::Resizing { app_idx, .. } = &self.mode {
                         let app_idx = *app_idx;
-                        if let Some(win) = self.applications.get_mut(app_idx).and_then(|a| a.window_mut()) {
+                        if let Some(win) = self
+                            .applications
+                            .get_mut(app_idx)
+                            .and_then(|a| a.window_mut())
+                        {
                             let (width, height) = wm::resize_preview_size(win, &self.pointer);
                             win.width = width;
                             win.height = height;
@@ -962,7 +1212,9 @@ impl Desktop {
             && let Some(sel) = self.menu_item_under_pointer(menu_idx)
         {
             self.select_menu_item(menu_idx, sel);
-            let item = self.applications.get(menu_idx)
+            let item = self
+                .applications
+                .get(menu_idx)
                 .and_then(|a| a.menu.as_ref())
                 .and_then(|s| s.items.get(s.selected))
                 .cloned();
@@ -975,9 +1227,16 @@ impl Desktop {
 
         // Clicking the body of an interactive terminal dives into it, so the
         // next pointer events reach the app.
-        if let Some(top) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
-            && let Some(win) = self.applications.get(top).and_then(|a| a.window())
-            && self.applications[top].terminal.as_ref().map_or(false, |t| t.interactive)
+        if let Some(top) = topmost_window_at(
+            &self.applications,
+            self.current_desktop,
+            self.pointer.x,
+            self.pointer.y,
+        ) && let Some(win) = self.applications.get(top).and_then(|a| a.window())
+            && self.applications[top]
+                .terminal
+                .as_ref()
+                .is_some_and(|t| t.interactive)
             && self.pointer.x > win.position_x
             && self.pointer.x < win.position_x + win.width - 1
             && self.pointer.y > win.position_y
@@ -993,9 +1252,18 @@ impl Desktop {
 
     fn mouse_right_press(&mut self) -> bool {
         // Right-click focuses (raises) the window under the pointer.
-        if let Some(top_idx) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y) {
+        if let Some(top_idx) = topmost_window_at(
+            &self.applications,
+            self.current_desktop,
+            self.pointer.x,
+            self.pointer.y,
+        ) {
             bring_window_to_front(&mut self.applications, top_idx);
-            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                &self.applications,
+                self.current_desktop,
+                self.last_size.1,
+            ));
             self.mode = Mode::Normal;
             true
         } else {
@@ -1014,16 +1282,26 @@ impl Desktop {
         // Tab / minimization rail on the rightmost column.
         if self.pointer.x == sb_x && self.pointer.y >= sb_top && self.pointer.y <= sb_bot {
             let track = (sb_bot - sb_top + 1) as usize;
-            let total = self.applications.iter()
+            let total = self
+                .applications
+                .iter()
                 .filter(|a| a.on_desktop(self.current_desktop) && a.is_minimized())
                 .count();
-            let tab_h = if (total as u16) * 8 <= (sb_bot - sb_top + 1) { 8 } else { 6 };
+            let tab_h = if (total as u16) * 8 <= (sb_bot - sb_top + 1) {
+                8
+            } else {
+                6
+            };
             let visible = (track / (tab_h as usize).max(1)).max(1);
             if total > visible {
                 self.tab_scroll = if up {
                     self.tab_scroll.saturating_sub(1)
                 } else {
-                    (self.tab_scroll + 1).min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1))
+                    (self.tab_scroll + 1).min(max_tab_scroll(
+                        &self.applications,
+                        self.current_desktop,
+                        self.last_size.1,
+                    ))
                 };
                 return true;
             }
@@ -1039,22 +1317,36 @@ impl Desktop {
         {
             let inner_w = win.width.saturating_sub(2) as usize;
             let inner_h = win.height.saturating_sub(2) as usize;
-            let max_scroll = self.applications[help_idx].help.as_ref()
+            let max_scroll = self.applications[help_idx]
+                .help
+                .as_ref()
                 .map(|help| crate::ui::help_max_scroll(&help.lines, inner_w.max(1), inner_h.max(1)))
                 .unwrap_or(0);
-            if let Some(help) = self.applications.get_mut(help_idx).and_then(|a| a.help.as_mut()) {
+            if let Some(help) = self
+                .applications
+                .get_mut(help_idx)
+                .and_then(|a| a.help.as_mut())
+            {
                 help.scroll = if up {
                     help.scroll.saturating_add(1)
                 } else {
                     help.scroll.saturating_sub(1)
-                }.min(max_scroll);
+                }
+                .min(max_scroll);
             }
             return true;
         }
 
         // Terminal under the pointer: scroll its scrollback.
-        if let Some(top) = topmost_window_at(&self.applications, self.current_desktop, self.pointer.x, self.pointer.y)
-            && let Some(t) = self.applications.get_mut(top).and_then(|a| a.terminal.as_mut())
+        if let Some(top) = topmost_window_at(
+            &self.applications,
+            self.current_desktop,
+            self.pointer.x,
+            self.pointer.y,
+        ) && let Some(t) = self
+            .applications
+            .get_mut(top)
+            .and_then(|a| a.terminal.as_mut())
         {
             if up {
                 t.panel_scroll = t.panel_scroll.saturating_add(1);
@@ -1079,14 +1371,19 @@ impl Desktop {
     /// Forward a pointer event to a focused interactive session (SGR), so
     /// mouse-aware apps (vim, mc, ...) track the pointer as in a terminal.
     fn forward_mouse(&mut self, app_idx: usize, ev: MouseEvent) -> bool {
-        if let Some(bytes) = crate::app::terminal::mouse_to_bytes(ev) {
-            if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
-                if is_pty {
-                    if let Some(ref mut s) = t.shell_session {
-                        let _ = s.write(&bytes);
-                    }
-                }
+        if let Some(bytes) = crate::app::terminal::mouse_to_bytes(ev)
+            && let Some(t) = self
+                .applications
+                .get_mut(app_idx)
+                .and_then(|a| a.terminal.as_mut())
+        {
+            let is_pty = t
+                .shell_session
+                .as_ref()
+                .map(|s| s.is_real_pty())
+                .unwrap_or(false);
+            if is_pty && let Some(ref mut s) = t.shell_session {
+                s.write(&bytes);
             }
         }
         true
@@ -1102,7 +1399,9 @@ impl Desktop {
             if app.is_menu || app.help.is_some() {
                 continue;
             }
-            let Some(terminal) = app.terminal.as_ref() else { continue };
+            let Some(terminal) = app.terminal.as_ref() else {
+                continue;
+            };
             let Some(win) = app.window() else { continue };
             session.apps.push(crate::session::SavedApp {
                 title: app.title.clone(),
@@ -1140,7 +1439,13 @@ impl Desktop {
                     &self.current_path,
                     cmds,
                 );
-                place_pointer_on_terminal_input(&mut self.pointer, &self.applications, app_idx, self.last_size.0, self.last_size.1);
+                place_pointer_on_terminal_input(
+                    &mut self.pointer,
+                    &self.applications,
+                    app_idx,
+                    self.last_size.0,
+                    self.last_size.1,
+                );
                 self.mode = Mode::TerminalFocus { app_idx };
                 mode_changed = true;
             }
@@ -1153,13 +1458,23 @@ impl Desktop {
                 mode_changed = true;
             }
             Key::Up => {
-                if input::history_up(&self.commands, &mut self.cmd_input, &mut self.history_index, &mut self.history_draft) {
+                if input::history_up(
+                    &self.commands,
+                    &mut self.cmd_input,
+                    &mut self.history_index,
+                    &mut self.history_draft,
+                ) {
                     self.cmd_cursor = input::input_char_len(&self.cmd_input);
                     mode_changed = true;
                 }
             }
             Key::Down => {
-                if input::history_down(&self.commands, &mut self.cmd_input, &mut self.history_index, &mut self.history_draft) {
+                if input::history_down(
+                    &self.commands,
+                    &mut self.cmd_input,
+                    &mut self.history_index,
+                    &mut self.history_draft,
+                ) {
                     self.cmd_cursor = input::input_char_len(&self.cmd_input);
                     mode_changed = true;
                 }
@@ -1176,7 +1491,11 @@ impl Desktop {
             }
             Key::Tab => {
                 input::reset_history_navigation(&mut self.history_index, &mut self.history_draft);
-                if input::autocomplete_input(&mut self.cmd_input, &mut self.cmd_cursor, &self.current_path) {
+                if input::autocomplete_input(
+                    &mut self.cmd_input,
+                    &mut self.cmd_cursor,
+                    &self.current_path,
+                ) {
                     mode_changed = true;
                 }
             }
@@ -1185,7 +1504,8 @@ impl Desktop {
                 if !trimmed.is_empty() {
                     let (command, flagged) = split_interactive_flag(&trimmed);
                     let program_hint = command.split_whitespace().next().unwrap_or("").to_string();
-                    let interactive = flagged || (!command.is_empty() && is_interactive_app(&program_hint));
+                    let interactive =
+                        flagged || (!command.is_empty() && is_interactive_app(&program_hint));
 
                     // `#i app` (or an interactive-list app) opens an interactive terminal
                     // running the program; a bare `#i` opens the default shell interactively.
@@ -1221,7 +1541,10 @@ impl Desktop {
                     self.history.append(&trimmed);
                     self.cmd_input.clear();
                     self.cmd_cursor = 0;
-                    input::reset_history_navigation(&mut self.history_index, &mut self.history_draft);
+                    input::reset_history_navigation(
+                        &mut self.history_index,
+                        &mut self.history_draft,
+                    );
                     self.panel_scroll = 0;
                 }
                 mode_changed = true;
@@ -1251,12 +1574,13 @@ impl Desktop {
     fn key_moving(&mut self, key: Key, app_idx: usize) -> bool {
         let mut mode_changed = false;
         match key {
-            Key::Up    => self.pointer.move_up(),
-            Key::Down  => self.pointer.move_down(self.last_size.1),
-            Key::Left  => self.pointer.move_left(),
+            Key::Up => self.pointer.move_up(),
+            Key::Down => self.pointer.move_down(self.last_size.1),
+            Key::Left => self.pointer.move_left(),
             Key::Right => self.pointer.move_right(self.last_size.0),
             Key::Char(' ') | Key::Enter => {
-                let is_double = self.last_space_time
+                let is_double = self
+                    .last_space_time
                     .as_ref()
                     .map(|t| t.elapsed() < Duration::from_millis(300))
                     .unwrap_or(false);
@@ -1293,11 +1617,19 @@ impl Desktop {
                 mode_changed = true;
             }
             Key::Char('x') | Key::Char('h') => {
-                edit = Some(ResizeEditState { axis: wm::ResizeAxis::Width, op: None, value: String::new() });
+                edit = Some(ResizeEditState {
+                    axis: wm::ResizeAxis::Width,
+                    op: None,
+                    value: String::new(),
+                });
                 mode_changed = true;
             }
             Key::Char('y') | Key::Char('v') => {
-                edit = Some(ResizeEditState { axis: wm::ResizeAxis::Height, op: None, value: String::new() });
+                edit = Some(ResizeEditState {
+                    axis: wm::ResizeAxis::Height,
+                    op: None,
+                    value: String::new(),
+                });
                 mode_changed = true;
             }
             _ if edit.is_some() => {
@@ -1328,10 +1660,16 @@ impl Desktop {
                             mode_changed = true;
                         }
                         Key::Enter => {
-                            if let Some(win) = self.applications[app_idx].window() {
-                                if !state.value.is_empty() {
-                                    changed_pointer = apply_resize_edit(win, &mut self.pointer, self.last_size.0, self.last_size.1, state);
-                                }
+                            if let Some(win) = self.applications[app_idx].window()
+                                && !state.value.is_empty()
+                            {
+                                changed_pointer = apply_resize_edit(
+                                    win,
+                                    &mut self.pointer,
+                                    self.last_size.0,
+                                    self.last_size.1,
+                                    state,
+                                );
                             }
                             clear_edit = true;
                             mode_changed = true;
@@ -1347,12 +1685,13 @@ impl Desktop {
                     edit = None;
                 }
                 if changed_pointer {
-                    self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
+                    self.pointer
+                        .clamp_to_bounds(self.last_size.0, self.last_size.1);
                 }
             }
-            Key::Up    => self.pointer.move_up(),
-            Key::Down  => self.pointer.move_down(self.last_size.1),
-            Key::Left  => self.pointer.move_left(),
+            Key::Up => self.pointer.move_up(),
+            Key::Down => self.pointer.move_down(self.last_size.1),
+            Key::Left => self.pointer.move_left(),
             Key::Right => self.pointer.move_right(self.last_size.0),
             Key::Char(' ') | Key::Enter => {
                 if let Some(win) = self.applications[app_idx].window_mut() {
@@ -1404,18 +1743,30 @@ impl Desktop {
                         // is sent to the shell on Enter.
                         match key {
                             Key::Char(c) => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
                                 input::insert_input_char(&mut t.cmd_input, &mut t.input_cursor, c);
                                 mode_changed = true;
                             }
                             Key::Backspace => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                if input::backspace_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
+                                if input::backspace_input_char(
+                                    &mut t.cmd_input,
+                                    &mut t.input_cursor,
+                                ) {
                                     mode_changed = true;
                                 }
                             }
                             Key::Delete => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
                                 if input::delete_input_char(&mut t.cmd_input, &mut t.input_cursor) {
                                     mode_changed = true;
                                 }
@@ -1426,7 +1777,8 @@ impl Desktop {
                                 }
                             }
                             Key::Right => {
-                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor) {
+                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor)
+                                {
                                     mode_changed = true;
                                 }
                             }
@@ -1439,25 +1791,43 @@ impl Desktop {
                                 mode_changed = true;
                             }
                             Key::Up => {
-                                if input::history_up(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                if input::history_up(
+                                    &t.commands,
+                                    &mut t.cmd_input,
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                ) {
                                     t.input_cursor = input::input_char_len(&t.cmd_input);
                                     mode_changed = true;
                                 }
                             }
                             Key::Down => {
-                                if input::history_down(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                if input::history_down(
+                                    &t.commands,
+                                    &mut t.cmd_input,
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                ) {
                                     t.input_cursor = input::input_char_len(&t.cmd_input);
                                     mode_changed = true;
                                 }
                             }
                             Key::Tab => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
+                                if input::autocomplete_input(
+                                    &mut t.cmd_input,
+                                    &mut t.input_cursor,
+                                    &t.path,
+                                ) {
                                     mode_changed = true;
                                 }
                             }
                             Key::CtrlD => {
-                                // EOF/EOF-ish for tools that use Ctrl+D (python 3, shells).
+                                // Forward EOF (Ctrl+D) for tools that read it
+                                // (python 3, shells).
                                 t.clear_repl();
                                 if let Some(ref mut session) = t.shell_session {
                                     session.write(&[4]);
@@ -1479,13 +1849,23 @@ impl Desktop {
                         // Fallback without a session: local editing (legacy).
                         match key {
                             Key::Up => {
-                                if input::history_up(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                if input::history_up(
+                                    &t.commands,
+                                    &mut t.cmd_input,
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                ) {
                                     t.input_cursor = input::input_char_len(&t.cmd_input);
                                     mode_changed = true;
                                 }
                             }
                             Key::Down => {
-                                if input::history_down(&t.commands, &mut t.cmd_input, &mut t.history_index, &mut t.history_draft) {
+                                if input::history_down(
+                                    &t.commands,
+                                    &mut t.cmd_input,
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                ) {
                                     t.input_cursor = input::input_char_len(&t.cmd_input);
                                     mode_changed = true;
                                 }
@@ -1496,13 +1876,21 @@ impl Desktop {
                                 }
                             }
                             Key::Right => {
-                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor) {
+                                if input::move_input_cursor_right(&t.cmd_input, &mut t.input_cursor)
+                                {
                                     mode_changed = true;
                                 }
                             }
                             Key::Tab => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                if input::autocomplete_input(&mut t.cmd_input, &mut t.input_cursor, &t.path) {
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
+                                if input::autocomplete_input(
+                                    &mut t.cmd_input,
+                                    &mut t.input_cursor,
+                                    &t.path,
+                                ) {
                                     mode_changed = true;
                                 }
                             }
@@ -1512,25 +1900,40 @@ impl Desktop {
                                     push_shell_command(&mut t.commands, &mut t.path, &trimmed);
                                     t.cmd_input.clear();
                                     t.input_cursor = 0;
-                                    input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                    input::reset_history_navigation(
+                                        &mut t.history_index,
+                                        &mut t.history_draft,
+                                    );
                                     t.panel_scroll = 0;
                                 }
                                 mode_changed = true;
                             }
                             Key::Delete => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
                                 if input::delete_input_char(&mut t.cmd_input, &mut t.input_cursor) {
                                     mode_changed = true;
                                 }
                             }
                             Key::Backspace => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
-                                if input::backspace_input_char(&mut t.cmd_input, &mut t.input_cursor) {
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
+                                if input::backspace_input_char(
+                                    &mut t.cmd_input,
+                                    &mut t.input_cursor,
+                                ) {
                                     mode_changed = true;
                                 }
                             }
                             Key::Char(c) => {
-                                input::reset_history_navigation(&mut t.history_index, &mut t.history_draft);
+                                input::reset_history_navigation(
+                                    &mut t.history_index,
+                                    &mut t.history_draft,
+                                );
                                 input::insert_input_char(&mut t.cmd_input, &mut t.input_cursor, c);
                                 mode_changed = true;
                             }
@@ -1569,39 +1972,49 @@ impl Desktop {
             Key::CtrlV => {
                 // Paste: OS clipboard first, Manto in-memory fallback.
                 let text = self.read_clipboard();
-                if let Some(text) = text {
-                    if !text.is_empty() {
-                        if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                            let is_pty = t.shell_session.as_ref().map(|s| s.is_real_pty()).unwrap_or(false);
-                            if let Some(em) = t.emulator.as_mut() {
-                                if !is_pty {
-                                    em.process(text.as_bytes());
-                                }
-                            }
-                            if is_pty {
-                                if let Some(ref mut s) = t.shell_session {
-                                    let _ = s.write(text.as_bytes());
-                                }
-                            } else {
-                                // Piped sessions: buffer until Enter so the
-                                // pasted text joins the edited line.
-                                t.pipe_feed(text.as_bytes());
-                            }
+                if let Some(text) = text
+                    && !text.is_empty()
+                    && let Some(t) = self
+                        .applications
+                        .get_mut(app_idx)
+                        .and_then(|a| a.terminal.as_mut())
+                {
+                    let is_pty = t
+                        .shell_session
+                        .as_ref()
+                        .map(|s| s.is_real_pty())
+                        .unwrap_or(false);
+                    if let Some(em) = t.emulator.as_mut()
+                        && !is_pty
+                    {
+                        em.process(text.as_bytes());
+                    }
+                    if is_pty {
+                        if let Some(ref mut s) = t.shell_session {
+                            s.write(text.as_bytes());
                         }
+                    } else {
+                        // Piped sessions: buffer until Enter so the
+                        // pasted text joins the edited line.
+                        t.pipe_feed(text.as_bytes());
                     }
                 }
                 true
             }
             Key::Mouse(ev) => {
                 // A press outside the terminal window returns to the desktop.
-                let inside = self.applications.get(app_idx).and_then(|a| a.window()).map_or(false, |win| {
-                    let x = ev.x.saturating_sub(1);
-                    let y = ev.y.saturating_sub(1);
-                    x >= win.position_x
-                        && x < win.position_x + win.width
-                        && y >= win.position_y
-                        && y < win.position_y + win.height
-                });
+                let inside = self
+                    .applications
+                    .get(app_idx)
+                    .and_then(|a| a.window())
+                    .is_some_and(|win| {
+                        let x = ev.x.saturating_sub(1);
+                        let y = ev.y.saturating_sub(1);
+                        x >= win.position_x
+                            && x < win.position_x + win.width
+                            && y >= win.position_y
+                            && y < win.position_y + win.height
+                    });
                 if !inside {
                     self.mode = Mode::Normal;
                     return self.handle_mouse(ev);
@@ -1616,7 +2029,9 @@ impl Desktop {
     /// backend has no real PTY.
     fn forward_interactive(&mut self, app_idx: usize, key: Key, enter: bool) -> bool {
         let _ = enter;
-        let is_pty = self.applications.get(app_idx)
+        let is_pty = self
+            .applications
+            .get(app_idx)
             .and_then(|a| a.terminal.as_ref())
             .and_then(|t| t.shell_session.as_ref())
             .map(|s| s.is_real_pty())
@@ -1624,12 +2039,14 @@ impl Desktop {
 
         // Real PTY: the child/console handles echo, editing and history.
         if is_pty {
-            if let Some(bytes) = crate::app::terminal::key_to_bytes(key) {
-                if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
-                    if let Some(ref mut s) = t.shell_session {
-                        let _ = s.write(&bytes);
-                    }
-                }
+            if let Some(bytes) = crate::app::terminal::key_to_bytes(key)
+                && let Some(t) = self
+                    .applications
+                    .get_mut(app_idx)
+                    .and_then(|a| a.terminal.as_mut())
+                && let Some(ref mut s) = t.shell_session
+            {
+                s.write(&bytes);
             }
             return true;
         }
@@ -1638,7 +2055,11 @@ impl Desktop {
         // mirrors the keystrokes, edits the partial line locally and recalls a
         // local history with Up/Down. A real console would otherwise leak
         // control bytes into the child or move the emulator's cursor.
-        if let Some(t) = self.applications.get_mut(app_idx).and_then(|a| a.terminal.as_mut()) {
+        if let Some(t) = self
+            .applications
+            .get_mut(app_idx)
+            .and_then(|a| a.terminal.as_mut())
+        {
             match key {
                 Key::Up => {
                     t.pipe_recall(true);
@@ -1651,7 +2072,10 @@ impl Desktop {
                     t.pipe_flush();
                 }
                 Key::Backspace => {
-                    t.mirror_input(&crate::app::terminal::key_to_bytes(key).unwrap_or_default(), true);
+                    t.mirror_input(
+                        &crate::app::terminal::key_to_bytes(key).unwrap_or_default(),
+                        true,
+                    );
                     t.pipe_backspace();
                     t.reset_pipe_history();
                 }
@@ -1674,10 +2098,12 @@ impl Desktop {
         true
     }
 
-    /// Send the `.>` line: to the session (classic line mode) or, without a
+    /// Send the `.>` line to the session (classic line mode) or, without a
     /// session, through the command runner. Resets the input bar.
     fn run_terminal_line(&mut self, app_idx: usize) -> bool {
-        let cmd = self.applications[app_idx].terminal.as_ref()
+        let cmd = self.applications[app_idx]
+            .terminal
+            .as_ref()
             .map(|t| t.cmd_input.trim().to_string())
             .unwrap_or_default();
         if cmd.is_empty() {
@@ -1711,8 +2137,14 @@ impl Desktop {
             return;
         }
         self.history.append(cmd);
-        if self.commands.last().map(|e| e.command != cmd).unwrap_or(true) {
-            self.commands.push(CommandEntry::completed(cmd, &self.current_path, Vec::new()));
+        if self
+            .commands
+            .last()
+            .map(|e| e.command != cmd)
+            .unwrap_or(true)
+        {
+            self.commands
+                .push(CommandEntry::completed(cmd, &self.current_path, Vec::new()));
         }
     }
 
@@ -1721,47 +2153,60 @@ impl Desktop {
     /// commands with Up/Down.
     fn shared_history_commands(&self) -> Vec<CommandEntry> {
         let cwd = self.current_path.clone();
-        self.history.load(1000).into_iter().filter_map(|line| {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                None
-            } else {
-                Some(CommandEntry::completed(&line, &cwd, vec![line.clone()]))
-            }
-        }).collect()
+        self.history
+            .load(1000)
+            .into_iter()
+            .filter_map(|line| {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(CommandEntry::completed(&line, &cwd, vec![line.clone()]))
+                }
+            })
+            .collect()
     }
 
     /// Index of the open start menu window on the current desktop.
     fn start_menu_idx(&self) -> Option<usize> {
-        self.applications.iter().rposition(|app| {
-            app.on_desktop(self.current_desktop) && app.is_menu
-        })
+        self.applications
+            .iter()
+            .rposition(|app| app.on_desktop(self.current_desktop) && app.is_menu)
     }
 
     /// Index of the open help window on the current desktop.
     fn help_idx(&self) -> Option<usize> {
-        self.applications.iter().rposition(|app| {
-            app.on_desktop(self.current_desktop) && app.help.is_some()
-        })
+        self.applications
+            .iter()
+            .rposition(|app| app.on_desktop(self.current_desktop) && app.help.is_some())
     }
 
     /// Close the open help window (it is re-created on the next toggle).
     fn close_help(&mut self, help_idx: usize) {
         self.applications.remove(help_idx);
-        self.tab_scroll = self.tab_scroll
-            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+        self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+            &self.applications,
+            self.current_desktop,
+            self.last_size.1,
+        ));
     }
 
     /// Close the open help window when a left press lands anywhere but on it
     /// (windows, desktop, dock, tabs, scrollbars...).
     fn dismiss_help_on_outside_press(&mut self) {
-        let Some(help_idx) = self.help_idx() else { return };
-        let inside = self.applications.get(help_idx).and_then(|a| a.window()).map_or(false, |win| {
-            self.pointer.x >= win.position_x
-                && self.pointer.x <= win.position_x + win.width - 1
-                && self.pointer.y >= win.position_y
-                && self.pointer.y <= win.position_y + win.height - 1
-        });
+        let Some(help_idx) = self.help_idx() else {
+            return;
+        };
+        let inside = self
+            .applications
+            .get(help_idx)
+            .and_then(|a| a.window())
+            .is_some_and(|win| {
+                self.pointer.x >= win.position_x
+                    && self.pointer.x < win.position_x + win.width
+                    && self.pointer.y >= win.position_y
+                    && self.pointer.y < win.position_y + win.height
+            });
         if !inside {
             self.close_help(help_idx);
         }
@@ -1778,30 +2223,45 @@ impl Desktop {
                 Some(true)
             }
             Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
-                let (inner_w, inner_h) = self.applications.get(help_idx)
+                let (inner_w, inner_h) = self
+                    .applications
+                    .get(help_idx)
                     .and_then(|app| app.window())
                     .map_or((80, 20), |win| {
-                        (win.width.saturating_sub(2) as usize,
-                         win.height.saturating_sub(2) as usize)
-                    });
-                let max_scroll = self.applications.get(help_idx)
-                    .map(|app| app.help.as_ref())
-                    .flatten()
-                    .map_or(0, |help| {
-                        crate::ui::help_max_scroll(
-                            &help.lines,
-                            inner_w.max(1),
-                            inner_h.max(1),
+                        (
+                            win.width.saturating_sub(2) as usize,
+                            win.height.saturating_sub(2) as usize,
                         )
                     });
-                if let Some(help) = self.applications.get_mut(help_idx).and_then(|app| app.help.as_mut()) {
+                let max_scroll = self
+                    .applications
+                    .get(help_idx)
+                    .and_then(|app| app.help.as_ref())
+                    .map_or(0, |help| {
+                        crate::ui::help_max_scroll(&help.lines, inner_w.max(1), inner_h.max(1))
+                    });
+                if let Some(help) = self
+                    .applications
+                    .get_mut(help_idx)
+                    .and_then(|app| app.help.as_mut())
+                {
                     match key {
                         Key::Up | Key::PageUp => {
-                            help.scroll = help.scroll.saturating_sub(if matches!(key, Key::PageUp) { inner_h } else { 1 });
+                            help.scroll =
+                                help.scroll.saturating_sub(if matches!(key, Key::PageUp) {
+                                    inner_h
+                                } else {
+                                    1
+                                });
                         }
                         _ => {
-                            help.scroll = (help.scroll + if matches!(key, Key::PageDown) { inner_h } else { 1 })
-                                .min(max_scroll);
+                            help.scroll = (help.scroll
+                                + if matches!(key, Key::PageDown) {
+                                    inner_h
+                                } else {
+                                    1
+                                })
+                            .min(max_scroll);
                         }
                     }
                 }
@@ -1819,7 +2279,8 @@ impl Desktop {
         {
             self.pointer.x = win.position_x + 1;
             self.pointer.y = win.position_y + 1;
-            self.pointer.clamp_to_bounds(self.last_size.0, self.last_size.1);
+            self.pointer
+                .clamp_to_bounds(self.last_size.0, self.last_size.1);
         }
     }
 
@@ -1895,7 +2356,9 @@ impl Desktop {
 
     /// Move the menu selection, keeping it inside the visible rows.
     fn select_menu_item(&mut self, menu_idx: usize, selected: usize) {
-        let visible = self.applications.get(menu_idx)
+        let visible = self
+            .applications
+            .get(menu_idx)
             .and_then(|app| app.window())
             .map_or(1, |win| (win.height as usize).saturating_sub(2).max(1));
         if let Some(state) = self.applications[menu_idx].menu.as_mut() {
@@ -1907,8 +2370,11 @@ impl Desktop {
     /// Close the start menu window (it is re-created on the next toggle).
     fn close_start_menu(&mut self, menu_idx: usize) {
         self.applications.remove(menu_idx);
-        self.tab_scroll = self.tab_scroll
-            .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+        self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+            &self.applications,
+            self.current_desktop,
+            self.last_size.1,
+        ));
     }
 
     /// Launch a manifest entry: interactive app, plain terminal, or a
@@ -1964,8 +2430,11 @@ impl Desktop {
 
         if desktop != self.current_desktop {
             self.current_desktop = desktop;
-            self.tab_scroll = self.tab_scroll
-                .min(max_tab_scroll(&self.applications, self.current_desktop, self.last_size.1));
+            self.tab_scroll = self.tab_scroll.min(max_tab_scroll(
+                &self.applications,
+                self.current_desktop,
+                self.last_size.1,
+            ));
         }
 
         place_pointer_on_terminal_input(
@@ -2013,8 +2482,8 @@ impl ModeKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::screen::ScreenGrid;
     use crate::input::History;
+    use crate::ui::screen::ScreenGrid;
 
     fn test_desktop(w: u16, h: u16) -> Desktop {
         Desktop {
@@ -2051,26 +2520,46 @@ mod tests {
 
     fn press(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Press, button: MouseButton::Left,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Press,
+            button: MouseButton::Left,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
     fn release(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Release, button: MouseButton::Left,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Release,
+            button: MouseButton::Left,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
     fn drag(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Drag, button: MouseButton::Left,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Drag,
+            button: MouseButton::Left,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
     fn move_to(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Move, button: MouseButton::Left,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Move,
+            button: MouseButton::Left,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
 
@@ -2079,9 +2568,17 @@ mod tests {
         let mut d = test_desktop(80, 24);
         // Click the dock ".> " input (row h-2 = 22; sy = ev.y-1).
         d.handle_key(press(13, 23));
-        assert!(matches!(d.mode, Mode::Typing), "press should enter typing, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::Typing),
+            "press should enter typing, got {:?}",
+            d.mode
+        );
         d.handle_key(release(13, 23));
-        assert!(matches!(d.mode, Mode::Typing), "release must keep typing, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::Typing),
+            "release must keep typing, got {:?}",
+            d.mode
+        );
     }
 
     #[test]
@@ -2090,17 +2587,27 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Terminal input row: win.position_y + win.height - 2 = 5 + 20 - 2 = 23 -> ev.y = 24.
         // Column must be > win.position_x (10) and < position_x + width - 1 (59) -> ev.x = 20.
         d.handle_key(press(20, 24));
-        assert!(matches!(d.mode, Mode::TerminalFocus { .. }), "press should focus terminal, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::TerminalFocus { .. }),
+            "press should focus terminal, got {:?}",
+            d.mode
+        );
         d.handle_key(drag(22, 24));
         d.handle_key(release(22, 24));
-        assert!(matches!(d.mode, Mode::TerminalFocus { .. }), "release must keep focus, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::TerminalFocus { .. }),
+            "release must keep focus, got {:?}",
+            d.mode
+        );
     }
 
     #[test]
@@ -2109,13 +2616,19 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Press on the terminal body (row 14 / y=15), drag to (29,19), release.
         d.handle_key(press(20, 15));
-        assert!(matches!(d.mode, Mode::Normal), "body click stays normal, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::Normal),
+            "body click stays normal, got {:?}",
+            d.mode
+        );
         d.handle_key(drag(30, 20));
         let sel = d.sel.expect("drag should open a screen selection");
         assert_eq!(sel.anchor, (14, 19), "anchor is the press (row, col)");
@@ -2132,8 +2645,10 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         d.handle_key(press(20, 15));
@@ -2149,18 +2664,27 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Press the title bar row (y = 5 -> ev.y = 6).
         d.handle_key(press(20, 6));
-        assert!(matches!(d.mode, Mode::Moving { .. }), "title press enters Moving, got {:?}", d.mode);
+        assert!(
+            matches!(d.mode, Mode::Moving { .. }),
+            "title press enters Moving, got {:?}",
+            d.mode
+        );
         d.handle_key(drag(30, 6));
         assert!(d.sel.is_none(), "a window move drag must not select text");
         // The window follows the pointer in step_input (Moving mode); the drag
         // must keep the mode so that happens.
-        assert!(matches!(d.mode, Mode::Moving { .. }), "drag keeps moving the window");
+        assert!(
+            matches!(d.mode, Mode::Moving { .. }),
+            "drag keeps moving the window"
+        );
     }
 
     #[test]
@@ -2169,12 +2693,17 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Set up a leftover selection, then a plain click clears it.
-        d.sel = Some(crate::ui::screen::BoxSelect { anchor: (2, 2), extent: (4, 4) });
+        d.sel = Some(crate::ui::screen::BoxSelect {
+            anchor: (2, 2),
+            extent: (4, 4),
+        });
         d.sel_pos = Some((2, 2));
         d.handle_key(press(20, 15));
         d.handle_key(release(20, 15));
@@ -2187,8 +2716,10 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Start a selection drag; the button-up never arrives.
@@ -2205,7 +2736,11 @@ mod tests {
         // keep chasing the pointer after the button is gone.
         d.handle_key(move_to(50, 30));
         d.handle_key(move_to(60, 35));
-        assert_eq!(d.sel.unwrap(), sel_before, "hover motion must never extend the box");
+        assert_eq!(
+            d.sel.unwrap(),
+            sel_before,
+            "hover motion must never extend the box"
+        );
     }
 
     #[test]
@@ -2214,8 +2749,10 @@ mod tests {
         use crate::ui::window::Window;
         let mut d = test_desktop(120, 40);
         let app = Application::terminal_window(
-            "T", Window::new(10, 5, 50, 20, 0),
-            ".".to_string(), Vec::new(),
+            "T",
+            Window::new(10, 5, 50, 20, 0),
+            ".".to_string(),
+            Vec::new(),
         );
         d.applications.push(app);
         // Simulate a drag stuck with no release.
@@ -2230,7 +2767,10 @@ mod tests {
         assert!(d.mouse_down.is_none());
         d.handle_key(move_to(40, 25));
         d.handle_key(drag(41, 26)); // stray drag without a press: must not select
-        assert!(d.sel.is_none(), "a stray drag after Esc must not re-open a selection");
+        assert!(
+            d.sel.is_none(),
+            "a stray drag after Esc must not re-open a selection"
+        );
     }
 
     #[test]
@@ -2254,7 +2794,11 @@ mod tests {
         d.run_action(Action::Help);
         let help_idx = d.help_idx().unwrap();
         let scroll = |d: &Desktop| d.applications[help_idx].help.as_ref().unwrap().scroll;
-        let inner_h = d.applications[help_idx].window().unwrap().height.saturating_sub(2) as usize;
+        let inner_h = d.applications[help_idx]
+            .window()
+            .unwrap()
+            .height
+            .saturating_sub(2) as usize;
 
         assert_eq!(scroll(&d), 0);
         d.handle_key(Key::Down);
@@ -2272,11 +2816,18 @@ mod tests {
             d.applications[help_idx].window().unwrap().width as usize - 2,
             inner_h,
         );
-        assert_eq!(scroll(&d), max_scroll, "PageDown at the end clamps to the last page");
+        assert_eq!(
+            scroll(&d),
+            max_scroll,
+            "PageDown at the end clamps to the last page"
+        );
         d.handle_key(Key::PageUp);
         assert_eq!(scroll(&d), max_scroll.saturating_sub(inner_h));
         // Wheel over the help window scrolls it (up = older content).
-        d.handle_key(move_to(d.applications[help_idx].window().unwrap().position_x + 10, d.applications[help_idx].window().unwrap().position_y + 5));
+        d.handle_key(move_to(
+            d.applications[help_idx].window().unwrap().position_x + 10,
+            d.applications[help_idx].window().unwrap().position_y + 5,
+        ));
         let (wx, wy) = (d.pointer.x + 1, d.pointer.y + 1);
         let before = scroll(&d);
         d.handle_key(wheel_down_at(wx, wy));
@@ -2295,8 +2846,8 @@ mod tests {
             (win.position_x, win.position_y, win.width, win.height)
         };
         // A click cornered far away from the window closes it.
-        let x = x0.saturating_sub(3).max(2) as u16;
-        let y = y0.saturating_sub(3).max(2) as u16;
+        let x = x0.saturating_sub(3).max(2);
+        let y = y0.saturating_sub(3).max(2);
         d.handle_key(press(x + 1, y + 1));
         d.handle_key(release(x + 1, y + 1));
         assert!(d.help_idx().is_none(), "a click outside the help closes it");
@@ -2305,16 +2856,24 @@ mod tests {
 
     fn wheel_up_at(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Press, button: MouseButton::WheelUp,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Press,
+            button: MouseButton::WheelUp,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
     fn wheel_down_at(x: u16, y: u16) -> Key {
         Key::Mouse(MouseEvent {
-            x, y, kind: MouseAction::Press, button: MouseButton::WheelDown,
-            shift: false, ctrl: false, alt: false,
+            x,
+            y,
+            kind: MouseAction::Press,
+            button: MouseButton::WheelDown,
+            shift: false,
+            ctrl: false,
+            alt: false,
         })
     }
 }
-
-

@@ -11,23 +11,23 @@
       "command": "python3"
     },
     {
-      "label": "Terminal no home",
+      "label": "Terminal in home",
       "kind": "terminal",
       "cwd": "~"
     },
     {
-      "label": "Terminal neste projeto",
+      "label": "Terminal in Downloads",
       "kind": "terminal",
-      "cwd": "D:\\Projetos\\manto"
+      "cwd": "~/Downloads"
     },
     {
-      "label": "Rodar testes",
+      "label": "Run tests",
       "kind": "command",
       "command": "cargo",
       "args": ["test"]
     },
     {
-      "label": "Listar diretório (desktop 2)",
+      "label": "List directory (desktop 2)",
       "kind": "command",
       "command": "dir",
       "desktop": 2

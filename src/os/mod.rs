@@ -142,7 +142,8 @@ pub struct MouseEvent {
     /// 1-based row.
     pub y: u16,
     pub kind: MouseAction,
-    /// Set for wheel events; for Move/Release events the value is Left.
+    /// Meaningful for wheel and press events; platform-dependent for
+    /// Move/Release events.
     pub button: MouseButton,
     pub shift: bool,
     pub ctrl: bool,
@@ -152,7 +153,7 @@ pub struct MouseEvent {
 // ── Clipboard bridge (best-effort, no deps) ──────────────────────────────────
 // Windows uses Win32 FFI; Unix shells out to xclip/xsel/wl-copy when present.
 
-pub use platform::{clipboard_set, clipboard_get};
+pub use platform::{clipboard_get, clipboard_set};
 
 /// Search PATH for an executable by name, honoring PATHEXT. App-execution
 /// alias directories (WindowsApps) are skipped: those reparse points cannot
@@ -194,7 +195,7 @@ pub fn find_on_path(program: &str) -> Option<String> {
 //   held_arrow_keys()      - arrow keys currently held (for quadrant snapping)
 //   clipboard_set/get      - best-effort OS clipboard
 
-pub use platform::{enable_raw_mode, disable_raw_mode, size, poll, read_key, held_arrow_keys};
+pub use platform::{disable_raw_mode, enable_raw_mode, held_arrow_keys, poll, read_key, size};
 
 #[cfg(windows)]
 #[cfg(test)]

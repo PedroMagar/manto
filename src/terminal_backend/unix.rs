@@ -8,7 +8,7 @@ use super::TerminalUpdate;
 
 // ── PTY / process helpers via libc FFI ────────────────────────────────────────
 
-const O_RDWR:   i32 = 0o0002;
+const O_RDWR: i32 = 0o0002;
 const O_NOCTTY: i32 = 0o0110; // 0o0100 (O_NOCTTY) | 0o0010 (O_CLOEXEC)
 const TIOCGWINSZ: usize = 0x5413;
 const TIOCSWINSZ: usize = 0x5414;
@@ -34,17 +34,27 @@ unsafe extern "C" {
 
 #[cfg(not(target_os = "linux"))]
 unsafe fn open(path: *const i8, flags: i32) -> RawFd {
-    // Fallback non-Linux implementation using posix_openpt on the slave path is
-    // not portable; Linux is the primary Unix target. On other Unixes authors
-    // should adapt this. We still attempt open(2) via libc where declared.
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    // Non-Linux: declare open(2) where available; Linux is the primary target.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
     {
         extern "C" {
             fn open(path: *const libc::c_char, flags: libc::c_int, ...) -> libc::c_int;
         }
         open(path, flags)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
     {
         let _ = (path, flags);
         -1 as RawFd
@@ -55,12 +65,17 @@ unsafe fn open(path: *const i8, flags: i32) -> RawFd {
 fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
     #[repr(C)]
     struct Winsize {
-        ws_row:    u16,
-        ws_col:    u16,
+        ws_row: u16,
+        ws_col: u16,
         ws_xpixel: u16,
         ws_ypixel: u16,
     }
-    let ws = Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+    let ws = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     unsafe {
         libc::ioctl(master_fd, TIOCSWINSZ as _, &ws);
     }
@@ -69,11 +84,11 @@ fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
 // ── Platform state ────────────────────────────────────────────────────────────
 
 pub struct PlatformCommand {
-    master_fd:   RawFd,
-    pid:         i32,
-    input_tx:    Sender<Vec<u8>>,
+    master_fd: RawFd,
+    pid: i32,
+    input_tx: Sender<Vec<u8>>,
     input_thread: Option<thread::JoinHandle<()>>,
-    closed:      bool,
+    closed: bool,
 }
 
 impl PlatformCommand {
@@ -146,7 +161,11 @@ impl Drop for PlatformCommand {
 ///   execvp(shell, shell -i)
 ///
 /// `command` is treated as the shell program to exec.
-pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+pub fn spawn(
+    command: &str,
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     let argv = [command.to_string(), "-i".to_string()];
     spawn_pty(&argv, cwd, tx)
 }
@@ -154,26 +173,43 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
 /// Spawn a program session (interactive app). The command line runs through
 /// `/bin/sh -lc`, so arguments parse like a typed command and bare names
 /// resolve through the shell.
-pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+pub fn spawn_app(
+    program: &str,
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     if program.trim().is_empty() {
         let shell = crate::app::terminal::default_shell();
         return spawn(&shell, cwd, tx);
     }
-    let argv = ["/bin/sh".to_string(), "-lc".to_string(), program.to_string()];
+    let argv = [
+        "/bin/sh".to_string(),
+        "-lc".to_string(),
+        program.to_string(),
+    ];
     spawn_pty(&argv, cwd, tx)
 }
 
 /// Spawn a program with explicit arguments attached to a fresh PTY
 /// (`execvp(program, program args...)`, no shell in between). This is the
 /// `TerminalBackend::spawn` platform path.
-pub fn spawn_argv(program: &str, args: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+pub fn spawn_argv(
+    program: &str,
+    args: &[String],
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(program.to_string());
     argv.extend_from_slice(args);
     spawn_pty(&argv, cwd, tx)
 }
 
-fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+fn spawn_pty(
+    argv: &[String],
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
     if master_fd < 0 {
         return Err("posix_openpt failed".to_string());
@@ -193,7 +229,9 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
         unsafe { close(master_fd) };
         return Err("ptsname failed".to_string());
     }
-    let slave_path = unsafe { CStr::from_ptr(slave_path_ptr) }.to_string_lossy().into_owned();
+    let slave_path = unsafe { CStr::from_ptr(slave_path_ptr) }
+        .to_string_lossy()
+        .into_owned();
 
     // Initial size from the host terminal.
     let (rows, cols) = unsafe {
@@ -203,11 +241,13 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
     };
     pty_set_size(master_fd, rows.max(2), cols.max(2));
 
-    let exec_c: Vec<CString> = argv.iter()
+    let exec_c: Vec<CString> = argv
+        .iter()
         .map(|arg| CString::new(arg.as_bytes()))
         .collect::<Result<_, _>>()
         .map_err(|_| "argument has interior NUL".to_string())?;
-    let slave_c = CString::new(slave_path.as_bytes()).map_err(|_| "slave path has interior NUL".to_string())?;
+    let slave_c = CString::new(slave_path.as_bytes())
+        .map_err(|_| "slave path has interior NUL".to_string())?;
     let cwd_c = CString::new(cwd.as_bytes()).map_err(|_| "cwd has interior NUL".to_string())?;
 
     let pid = unsafe {
@@ -254,11 +294,17 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let input_thread = thread::spawn(move || {
         while let Ok(data) = input_rx.recv() {
-            if data.is_empty() { break; }
+            if data.is_empty() {
+                break;
+            }
             let mut off: usize = 0;
             while off < data.len() {
                 unsafe {
-                    let ret = libc::write(master_fd, data[off..].as_ptr() as *const libc::c_void, data.len() - off);
+                    let ret = libc::write(
+                        master_fd,
+                        data[off..].as_ptr() as *const libc::c_void,
+                        data.len() - off,
+                    );
                     if ret > 0 {
                         off += ret as usize;
                     } else if ret < 0 {
@@ -300,7 +346,10 @@ fn spawn_pty(argv: &[String], cwd: &str, tx: Sender<TerminalUpdate>) -> Result<P
                 let ret = libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
                 if ret > 0 {
                     let n = ret as usize;
-                    if tx_out.send(TerminalUpdate::Output(buf[..n].to_vec())).is_err() {
+                    if tx_out
+                        .send(TerminalUpdate::Output(buf[..n].to_vec()))
+                        .is_err()
+                    {
                         break;
                     }
                 } else if ret == 0 {

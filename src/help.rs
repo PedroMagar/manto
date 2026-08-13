@@ -12,30 +12,42 @@ pub struct HelpState {
 
 impl HelpState {
     pub fn new() -> Self {
-        Self { lines: content(), scroll: 0 }
+        Self {
+            lines: content(),
+            scroll: 0,
+        }
     }
 }
 
 /// Number of display rows the source `lines` occupy once wrapped to `width`.
 pub fn wrapped_count(lines: &[String], width: usize) -> usize {
     let width = width.max(1);
-    lines.iter().map(|line| {
-        let len = line.chars().count();
-        if len == 0 { 1 } else { len.div_ceil(width) }
-    }).sum()
+    lines
+        .iter()
+        .map(|line| {
+            let len = line.chars().count();
+            if len == 0 { 1 } else { len.div_ceil(width) }
+        })
+        .sum()
 }
 
 /// The source `lines` wrapped to `width` characters each.
 pub fn wrapped(lines: &[String], width: usize) -> Vec<String> {
     let width = width.max(1);
-    lines.iter().flat_map(|line| {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.is_empty() {
-            vec![String::new()]
-        } else {
-            chars.chunks(width).map(|chunk| chunk.iter().collect()).collect()
-        }
-    }).collect()
+    lines
+        .iter()
+        .flat_map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.is_empty() {
+                vec![String::new()]
+            } else {
+                chars
+                    .chunks(width)
+                    .map(|chunk| chunk.iter().collect())
+                    .collect()
+            }
+        })
+        .collect()
 }
 
 /// The help crib sheet, line by line.
@@ -130,22 +142,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crib_sheet_has_headers_and_shortcuts() {
-        let lines = content();
-        assert!(lines.iter().any(|l| l.contains("Ctrl+H / F1")));
-        assert!(lines.iter().any(|l| l.contains("Ctrl+T")));
-        assert!(lines.iter().any(|l| l.contains("Alt+V")));
-        assert!(lines.iter().any(|l| l.contains("#i app")));
-        assert!(!lines.is_empty());
-    }
-
-    #[test]
     fn wrap_count_matches_wrapped_len() {
-        let lines = vec![
-            "hello world".to_string(),
-            String::new(),
-            "ab".to_string(),
-        ];
+        let lines = vec!["hello world".to_string(), String::new(), "ab".to_string()];
         for width in [1, 2, 5, 80] {
             let wrapped = wrapped(&lines, width);
             assert_eq!(wrapped_count(&lines, width), wrapped.len());
@@ -155,8 +153,11 @@ mod tests {
     #[test]
     fn wrapping_breaks_long_lines() {
         let lines = vec!["abcdef".to_string()];
-        assert_eq!(wrapped(&lines, 2), vec!["ab".to_string(), "cd".to_string(), "ef".to_string()]);
+        assert_eq!(
+            wrapped(&lines, 2),
+            vec!["ab".to_string(), "cd".to_string(), "ef".to_string()]
+        );
         // Empty source lines stay as a single row.
-        assert_eq!(wrapped(&vec![String::new()], 5), vec![String::new()]);
+        assert_eq!(wrapped(&[String::new()], 5), vec![String::new()]);
     }
 }

@@ -10,11 +10,30 @@ Manto is a terminal-driven desktop environment written in Rust. It provides floa
 
 MIT — see [LICENSE](LICENSE).
 
+## Requirements
+
+- Rust 1.88+ (the project uses the 2024 edition and let-chains)
+- Windows or Linux (a Unix-like OS); macOS is untested
+
 ## How To Run
 
 ```bash
 cargo run
 ```
+
+Or install the binary:
+
+```bash
+cargo install --path .
+manto
+```
+
+## Roadmap
+
+A planned **TUI app builder** will let users compose simple applications
+(buttons, text, nested layouts) declaratively. [`example/app.json`](example/app.json)
+is the early concept for the storage format of that builder; it is not read by
+the desktop yet.
 
 ## How To Use
 

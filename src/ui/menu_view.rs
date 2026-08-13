@@ -26,7 +26,7 @@ pub fn draw_menu_content(out: &mut impl Write, win: &Window, state: &MenuState) 
 
     if state.items.is_empty() {
         ansi::move_to(out, win.position_x + 1, win.position_y + 1);
-        let hint = fit_width("  (sem itens — edite ~/.manto/menu.json)", inner_w);
+        let hint = fit_width("  (no items — edit ~/.manto/menu.json)", inner_w);
         write!(out, "{hint:<inner_w$}").unwrap();
         return;
     }
@@ -41,7 +41,15 @@ pub fn draw_menu_content(out: &mut impl Write, win: &Window, state: &MenuState) 
                 let marker = if idx == state.selected { "▶" } else { " " };
                 let text = fit_width(&format!("{marker} {}", item.label), inner_w);
                 if idx == state.selected {
-                    write!(out, "{0}{1:<2$}{3}", ansi::REVERSE, text, inner_w, ansi::RESET).unwrap();
+                    write!(
+                        out,
+                        "{0}{1:<2$}{3}",
+                        ansi::REVERSE,
+                        text,
+                        inner_w,
+                        ansi::RESET
+                    )
+                    .unwrap();
                 } else {
                     write!(out, "{text:<inner_w$}").unwrap();
                 }

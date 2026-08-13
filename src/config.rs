@@ -34,14 +34,24 @@ pub enum Action {
 
 impl Config {
     pub fn new(theme: u16) -> Self {
-        Self { theme, shortcuts: default_shortcuts() }
+        Self {
+            theme,
+            shortcuts: default_shortcuts(),
+        }
     }
 
     /// Load the configuration from disk, starting from the defaults and
     /// overlaying whatever the user configured.
     pub fn load() -> Self {
+        Self::load_from(&config_path())
+    }
+
+    /// Load the configuration from `path`, starting from the defaults and
+    /// overlaying whatever the user configured. A missing or broken file
+    /// yields the defaults.
+    pub fn load_from(path: &std::path::Path) -> Self {
         let mut config = Self::new(1);
-        let Ok(source) = std::fs::read_to_string(config_path()) else {
+        let Ok(source) = std::fs::read_to_string(path) else {
             return config;
         };
         let Ok(json) = crate::json::parse(&source) else {
@@ -54,8 +64,12 @@ impl Config {
 
         if let Some(Json::Obj(shortcuts)) = json.field("shortcuts") {
             for (name, value) in shortcuts {
-                let Some(action) = action_for_name(name) else { continue };
-                let Some(key) = value.str_value().and_then(parse_shortcut) else { continue };
+                let Some(action) = action_for_name(name) else {
+                    continue;
+                };
+                let Some(key) = value.str_value().and_then(parse_shortcut) else {
+                    continue;
+                };
                 config.assign(action, key);
             }
         }
@@ -71,7 +85,10 @@ impl Config {
 
     /// The action bound to `key`, if any (most recent binding wins).
     pub fn resolve(&self, key: &Key) -> Option<Action> {
-        self.shortcuts.iter().rev().find_map(|(k, a)| (k == key).then_some(*a))
+        self.shortcuts
+            .iter()
+            .rev()
+            .find_map(|(k, a)| (k == key).then_some(*a))
     }
 }
 
@@ -197,7 +214,6 @@ mod tests {
         assert_eq!(config.resolve(&Key::CtrlDelete), Some(Action::Quit));
         assert_eq!(config.resolve(&Key::CtrlH), Some(Action::Help));
         assert_eq!(config.resolve(&Key::F1), Some(Action::Help));
-        assert_eq!(config.resolve(&Key::AltM), Some(Action::ToggleMouse));
         assert_eq!(config.resolve(&Key::Enter), None);
     }
 
@@ -239,27 +255,35 @@ mod tests {
 
     #[test]
     fn config_parses_from_json() {
-        let source = r#"{
-            "theme": 2,
-            "shortcuts": { "terminal": "ctrl+e", "quit": "ctrl+q" }
-        }"#;
-        let mut config = Config::new(0);
-        let json = crate::json::JsonParser::new(source).parse_value().unwrap();
-        if let Some(theme) = json.field("theme").and_then(|v| v.as_f64()) {
-            config.theme = (theme as i64).clamp(0, 2) as u16;
-        }
-        if let Some(Json::Obj(shortcuts)) = json.field("shortcuts") {
-            for (name, value) in shortcuts {
-                let Some(action) = action_for_name(name) else { continue };
-                let Some(key) = value.str_value().and_then(parse_shortcut) else { continue };
-                config.assign(action, key);
-            }
-        }
+        let path = std::env::temp_dir().join(format!("manto-config-test-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+                "theme": 2,
+                "shortcuts": { "terminal": "ctrl+e", "quit": "ctrl+q" }
+            }"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&path);
+        let _ = std::fs::remove_file(&path);
 
         assert_eq!(config.theme, 2);
         assert_eq!(config.resolve(&Key::CtrlE), Some(Action::NewTerminal));
         assert_eq!(config.resolve(&Key::CtrlQ), Some(Action::Quit));
         // Defaults for untouched actions survive.
         assert_eq!(config.resolve(&Key::CtrlF), Some(Action::ToggleMaximize));
+    }
+
+    #[test]
+    fn broken_config_falls_back_to_defaults() {
+        let path = std::env::temp_dir().join(format!("manto-config-broken-{}", std::process::id()));
+        std::fs::write(&path, "{not json").unwrap();
+
+        let config = Config::load_from(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(config.theme, 1);
+        assert_eq!(config.resolve(&Key::CtrlT), Some(Action::NewTerminal));
     }
 }

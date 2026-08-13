@@ -1,6 +1,5 @@
-// Minimal zero-dependency JSON parser (shared by menu, session and config).
-// `serde` stays commented in Cargo.toml, matching the portability policy of
-// ARCHITECTURE.md.
+// Minimal zero-dependency JSON parser (shared by menu, session and config),
+// keeping the portability policy of ARCHITECTURE.md.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
@@ -68,7 +67,10 @@ pub struct JsonParser<'a> {
 
 impl<'a> JsonParser<'a> {
     pub fn new(source: &'a str) -> Self {
-        Self { src: source.as_bytes(), pos: 0 }
+        Self {
+            src: source.as_bytes(),
+            pos: 0,
+        }
     }
 
     pub fn error(&self, message: &str) -> String {
@@ -202,11 +204,15 @@ impl<'a> JsonParser<'a> {
                             }
                             let low = self.parse_hex4()?;
                             let cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                            out.push(char::from_u32(cp)
-                                .ok_or_else(|| self.error("invalid surrogate pair"))?);
+                            out.push(
+                                char::from_u32(cp)
+                                    .ok_or_else(|| self.error("invalid surrogate pair"))?,
+                            );
                         } else {
-                            out.push(char::from_u32(cp)
-                                .ok_or_else(|| self.error("invalid unicode escape"))?);
+                            out.push(
+                                char::from_u32(cp)
+                                    .ok_or_else(|| self.error("invalid unicode escape"))?,
+                            );
                         }
                     }
                     _ => return Err(self.error("invalid escape")),
@@ -222,10 +228,15 @@ impl<'a> JsonParser<'a> {
                     };
                     let mut buf = vec![byte];
                     for _ in 0..extra {
-                        buf.push(self.bump().ok_or_else(|| self.error("unterminated string"))?);
+                        buf.push(
+                            self.bump()
+                                .ok_or_else(|| self.error("unterminated string"))?,
+                        );
                     }
-                    out.push_str(std::str::from_utf8(&buf)
-                        .map_err(|_| self.error("invalid UTF-8 in string"))?);
+                    out.push_str(
+                        std::str::from_utf8(&buf)
+                            .map_err(|_| self.error("invalid UTF-8 in string"))?,
+                    );
                 }
             }
         }
@@ -234,7 +245,9 @@ impl<'a> JsonParser<'a> {
     fn parse_hex4(&mut self) -> Result<u32, String> {
         let mut value = 0u32;
         for _ in 0..4 {
-            let byte = self.bump().ok_or_else(|| self.error("unterminated unicode escape"))?;
+            let byte = self
+                .bump()
+                .ok_or_else(|| self.error("unterminated unicode escape"))?;
             let digit = match byte {
                 b'0'..=b'9' => byte - b'0',
                 b'a'..=b'f' => byte - b'a' + 10,
@@ -278,12 +291,17 @@ mod tests {
     #[test]
     fn json_primitives_parse() {
         let value = parse_json_value(r#"{"a": 1, "b": [true, false, null], "c": "x"}"#);
-        let Json::Obj(fields) = value else { panic!("expected object") };
+        let Json::Obj(fields) = value else {
+            panic!("expected object")
+        };
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0], ("a".to_string(), Json::Num(1.0)));
         assert_eq!(
             fields[1],
-            ("b".to_string(), Json::Arr(vec![Json::Bool(true), Json::Bool(false), Json::Null]))
+            (
+                "b".to_string(),
+                Json::Arr(vec![Json::Bool(true), Json::Bool(false), Json::Null])
+            )
         );
         assert_eq!(fields[2], ("c".to_string(), Json::Str("x".to_string())));
     }
@@ -291,14 +309,18 @@ mod tests {
     #[test]
     fn json_string_handles_escapes_and_unicode() {
         let source = r#""tab\t quote\" slash\\ uni \u00e7\u00e3 emoji \ud83d\ude00""#;
-        let Json::Str(text) = parse_json_value(source) else { panic!("expected string") };
+        let Json::Str(text) = parse_json_value(source) else {
+            panic!("expected string")
+        };
         assert_eq!(text, "tab\t quote\" slash\\ uni çã emoji 😀");
     }
 
     #[test]
     fn json_accepts_trailing_commas() {
         let source = r#"{"a": 1, "b": [1, 2, ], }"#;
-        let Json::Obj(fields) = parse_json_value(source) else { panic!("expected object") };
+        let Json::Obj(fields) = parse_json_value(source) else {
+            panic!("expected object")
+        };
         assert_eq!(fields.len(), 2);
     }
 
@@ -317,9 +339,18 @@ mod tests {
         let source = r#"{"theme": 1, "name": "manto", "on": true, "items": [1, 2]}"#;
         let value = parse_json_value(source);
         assert_eq!(value.field("theme").and_then(|v| v.as_f64()), Some(1.0));
-        assert_eq!(value.field("name").and_then(|v| v.str_value()), Some("manto"));
+        assert_eq!(
+            value.field("name").and_then(|v| v.str_value()),
+            Some("manto")
+        );
         assert_eq!(value.field("on").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(value.field("items").and_then(|v| v.as_arr()).map(|a| a.len()), Some(2));
+        assert_eq!(
+            value
+                .field("items")
+                .and_then(|v| v.as_arr())
+                .map(|a| a.len()),
+            Some(2)
+        );
         assert_eq!(value.field("missing"), None);
     }
 }

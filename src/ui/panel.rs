@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use super::ansi;
-use super::terminal_view::{slice_line, terminal_content_width};
 use super::draw_scrollbar;
+use super::terminal_view::{slice_line, terminal_content_width};
 use crate::cmd::{CommandEntry, CommandStatus};
 
 /// Break `line` into slices of `width` characters.
@@ -14,7 +14,11 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
             rows.push(rem.to_string());
             break;
         }
-        let cut = rem.char_indices().nth(width).map(|(i, _)| i).unwrap_or(rem.len());
+        let cut = rem
+            .char_indices()
+            .nth(width)
+            .map(|(i, _)| i)
+            .unwrap_or(rem.len());
         rows.push(rem[..cut].to_string());
         rem = &rem[cut..];
     }
@@ -31,7 +35,7 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 /// `elision` = the `│ ├─ ...` marker used when intermediate outputs are hidden.
 #[derive(Clone)]
 pub(super) struct CommandBlock {
-    pub(super) header:  Vec<String>,
+    pub(super) header: Vec<String>,
     pub(super) elision: Vec<String>,
     pub(super) outputs: Vec<Vec<String>>,
 }
@@ -58,17 +62,26 @@ pub(super) fn build_blocks(commands: &[CommandEntry], width: usize) -> Vec<Comma
 
         let elision = wrap_line("  │ ├─ ...", width);
         let last_idx = entry.output_lines.len().saturating_sub(1);
-        let outputs = entry.output_lines.iter().enumerate().map(|(i, line)| {
-            let branch = if i == last_idx { "└─ " } else { "├─ " };
-            let suffix = if i == last_idx && !matches!(entry.status, CommandStatus::Complete) {
-                " (running)"
-            } else {
-                ""
-            };
-            wrap_line(&format!("  │ {}{}{}", branch, line, suffix), width)
-        }).collect();
+        let outputs = entry
+            .output_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let branch = if i == last_idx { "└─ " } else { "├─ " };
+                let suffix = if i == last_idx && !matches!(entry.status, CommandStatus::Complete) {
+                    " (running)"
+                } else {
+                    ""
+                };
+                wrap_line(&format!("  │ {branch}{line}{suffix}"), width)
+            })
+            .collect();
 
-        blocks.push(CommandBlock { header, elision, outputs });
+        blocks.push(CommandBlock {
+            header,
+            elision,
+            outputs,
+        });
         last_cwd = if entry.cwd.is_empty() {
             last_cwd
         } else {
@@ -84,7 +97,9 @@ pub(super) fn build_blocks(commands: &[CommandEntry], width: usize) -> Vec<Comma
 /// Within each block the newest intermediate outputs are removed first; the
 /// result and the header are the last to go.
 pub(super) fn clip_newest(blocks: &[CommandBlock], skip: usize) -> Vec<CommandBlock> {
-    if skip == 0 { return blocks.to_vec(); }
+    if skip == 0 {
+        return blocks.to_vec();
+    }
 
     let mut remaining = skip;
     for (i, block) in blocks.iter().enumerate().rev() {
@@ -110,45 +125,59 @@ pub(super) fn clip_newest(blocks: &[CommandBlock], skip: usize) -> Vec<CommandBl
 /// If there are hidden intermediates and enough space, `elision` is injected
 /// into `outputs`.
 fn clip_block(block: &CommandBlock, keep: usize) -> Option<CommandBlock> {
-    if keep == 0 { return None; }
-    if keep >= block_rows(block) { return Some(block.clone()); }
+    if keep == 0 {
+        return None;
+    }
+    if keep >= block_rows(block) {
+        return Some(block.clone());
+    }
 
     let h = block.header.len().min(keep);
     let header = block.header[..h].to_vec();
     if h == keep {
-        return Some(CommandBlock { header, elision: block.elision.clone(), outputs: vec![] });
+        return Some(CommandBlock {
+            header,
+            elision: block.elision.clone(),
+            outputs: vec![],
+        });
     }
 
     let out_budget = keep - h;
     let mut outputs = vec![];
 
-    if let Some((result, internals)) = block.outputs.split_last() {
-        if out_budget >= result.len() {
-            let internal: Vec<String> = internals.iter().flatten().cloned().collect();
-            let slots  = out_budget - result.len();
-            let hidden = internal.len().saturating_sub(slots);
-            // Sacrifice one slot for the elision marker when rows are hidden.
-            let (show, elide) = if hidden > 0 && slots > 0 {
-                (slots - 1, true)
-            } else {
-                (slots.min(internal.len()), false)
-            };
-            // Keep the OLDEST intermediates (from the start of the list).
-            for row in &internal[..show] {
-                outputs.push(vec![row.clone()]);
-            }
-            if elide { outputs.push(block.elision.clone()); }
-            outputs.push(result.clone());
+    if let Some((result, internals)) = block.outputs.split_last()
+        && out_budget >= result.len()
+    {
+        let internal: Vec<String> = internals.iter().flatten().cloned().collect();
+        let slots = out_budget - result.len();
+        let hidden = internal.len().saturating_sub(slots);
+        // Sacrifice one slot for the elision marker when rows are hidden.
+        let (show, elide) = if hidden > 0 && slots > 0 {
+            (slots - 1, true)
+        } else {
+            (slots.min(internal.len()), false)
+        };
+        // Keep the OLDEST intermediates (from the start of the list).
+        for row in &internal[..show] {
+            outputs.push(vec![row.clone()]);
         }
+        if elide {
+            outputs.push(block.elision.clone());
+        }
+        outputs.push(result.clone());
     }
 
-    Some(CommandBlock { header, elision: block.elision.clone(), outputs })
+    Some(CommandBlock {
+        header,
+        elision: block.elision.clone(),
+        outputs,
+    })
 }
 
 /// A flat row carrying the first header line of the block it belongs to.
 /// Lets the scroll > 0 path always paint the header as the first visible row.
 pub(super) struct FlatRow {
-    pub(super) text:   String,
+    pub(super) text: String,
     /// First line of the header of the block containing this row.
     pub(super) header: String,
 }
@@ -159,11 +188,17 @@ pub(super) fn flatten(blocks: &[CommandBlock]) -> Vec<FlatRow> {
     for block in blocks {
         let header = block.header.first().cloned().unwrap_or_default();
         for row in &block.header {
-            rows.push(FlatRow { text: row.clone(), header: header.clone() });
+            rows.push(FlatRow {
+                text: row.clone(),
+                header: header.clone(),
+            });
         }
         for output in &block.outputs {
             for row in output {
-                rows.push(FlatRow { text: row.clone(), header: header.clone() });
+                rows.push(FlatRow {
+                    text: row.clone(),
+                    header: header.clone(),
+                });
             }
         }
     }
@@ -179,49 +214,62 @@ pub(super) fn flatten(blocks: &[CommandBlock]) -> Vec<FlatRow> {
 ///
 /// Returns `(rows, any_hidden)`.
 pub(super) fn build_priority_rows(blocks: &[CommandBlock], area_h: usize) -> (Vec<String>, bool) {
-    if area_h == 0 || blocks.is_empty() { return (vec![], false); }
+    if area_h == 0 || blocks.is_empty() {
+        return (vec![], false);
+    }
 
     let mut budget = area_h;
     let mut sections: Vec<Vec<String>> = Vec::new();
     let mut any_hidden = false;
 
     for block in blocks.iter().rev() {
-        if budget == 0 { break; }
+        if budget == 0 {
+            break;
+        }
 
         // Header: always the first thing shown; stop if it does not fit.
         let h = budget.min(block.header.len());
-        if h == 0 { break; }
+        if h == 0 {
+            break;
+        }
         budget -= h;
 
         let mut section: Vec<String> = block.header[..h].to_vec();
 
-        if !block.outputs.is_empty() && budget > 0 {
-            if let Some((result, internals)) = block.outputs.split_last() {
-                if budget >= result.len() {
-                    let internal: Vec<&String> = internals.iter().flatten().collect();
-                    let space = budget - result.len();
-                    // Show the elision marker if there are more intermediates
-                    // than space and the marker itself fits.
-                    let can_elide = internal.len() > space && space > block.elision.len();
-                    let elision_cost = if can_elide { block.elision.len() } else { 0 };
-                    let show = space.saturating_sub(elision_cost).min(internal.len());
-                    let skip = internal.len().saturating_sub(show); // show the most RECENT
+        if !block.outputs.is_empty()
+            && budget > 0
+            && let Some((result, internals)) = block.outputs.split_last()
+        {
+            if budget >= result.len() {
+                let internal: Vec<&String> = internals.iter().flatten().collect();
+                let space = budget - result.len();
+                // Show the elision marker if there are more intermediates
+                // than space and the marker itself fits.
+                let can_elide = internal.len() > space && space > block.elision.len();
+                let elision_cost = if can_elide { block.elision.len() } else { 0 };
+                let show = space.saturating_sub(elision_cost).min(internal.len());
+                let skip = internal.len().saturating_sub(show); // show the most RECENT
 
-                    if internal.len() > show { any_hidden = true; }
-                    if can_elide { section.extend(block.elision.iter().cloned()); }
-                    section.extend(internal[skip..].iter().map(|s| (*s).clone()));
-                    section.extend(result.iter().cloned());
-                    budget -= section.len() - h;
-                } else {
+                if internal.len() > show {
                     any_hidden = true;
                 }
+                if can_elide {
+                    section.extend(block.elision.iter().cloned());
+                }
+                section.extend(internal[skip..].iter().map(|s| (*s).clone()));
+                section.extend(result.iter().cloned());
+                budget -= section.len() - h;
+            } else {
+                any_hidden = true;
             }
         }
 
         sections.push(section);
     }
 
-    if sections.len() < blocks.len() { any_hidden = true; }
+    if sections.len() < blocks.len() {
+        any_hidden = true;
+    }
     sections.reverse();
     (sections.into_iter().flatten().collect(), any_hidden)
 }
@@ -237,27 +285,42 @@ pub(super) fn build_priority_rows(blocks: &[CommandBlock], area_h: usize) -> (Ve
 ///   cols 1..w-3 : content  (inner = w-3)
 ///   col w-2     : scrollbar ░/█
 ///   col w-1     : │ right border
-pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, commands: &[CommandEntry], scroll: usize) {
-    if path.is_empty() || commands.is_empty() || w < 5 { return; }
-    let inner  = (w - 3) as usize;
+pub fn draw_command_panel(
+    out: &mut impl Write,
+    w: u16,
+    h: u16,
+    path: &str,
+    commands: &[CommandEntry],
+    scroll: usize,
+) {
+    if path.is_empty() || commands.is_empty() || w < 5 {
+        return;
+    }
+    let inner = (w - 3) as usize;
     let dash_w = (w - 2) as usize;
-    let max_h  = (h as usize * 3 / 4).min(h.saturating_sub(8) as usize);
-    if max_h < 3 { return; }
+    let max_h = (h as usize * 3 / 4).min(h.saturating_sub(8) as usize);
+    if max_h < 3 {
+        return;
+    }
 
     let content_w = terminal_content_width(path, commands).max(inner);
     let path_rows = vec![path.to_string()];
-    let blocks    = build_blocks(commands, content_w);
-    let sr_len    = total_rows(&blocks);
-    if path_rows.is_empty() || sr_len == 0 { return; }
+    let blocks = build_blocks(commands, content_w);
+    let sr_len = total_rows(&blocks);
+    if path_rows.is_empty() || sr_len == 0 {
+        return;
+    }
 
-    let path_h  = path_rows.len();
+    let path_h = path_rows.len();
     let panel_h = max_h.min(1 + path_h + sr_len);
-    if panel_h <= 1 + path_h { return; }
+    if panel_h <= 1 + path_h {
+        return;
+    }
     let area_h = panel_h - 1 - path_h;
 
     let max_scroll = sr_len.saturating_sub(area_h);
-    let scroll     = scroll.min(max_scroll);
-    let top_y      = h.saturating_sub(3 + panel_h as u16);
+    let scroll = scroll.min(max_scroll);
+    let top_y = h.saturating_sub(3 + panel_h as u16);
 
     // Top border
     ansi::move_to(out, 0, top_y);
@@ -268,7 +331,7 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     for row in &path_rows {
         ansi::move_to(out, 0, cur_y);
         let display = slice_line(row, 0, inner);
-        write!(out, "│{:<width$} │", display, width = inner).unwrap();
+        write!(out, "│{display:<inner$} │").unwrap();
         cur_y += 1;
     }
 
@@ -277,13 +340,15 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
         build_priority_rows(&blocks, area_h).0
     } else {
         // Sliding window: remove the `scroll` most recent rows, show the rest.
-        let clipped  = clip_newest(&blocks, scroll);
-        let flat     = flatten(&clipped);
-        let start    = flat.len().saturating_sub(area_h);
+        let clipped = clip_newest(&blocks, scroll);
+        let flat = flatten(&clipped);
+        let start = flat.len().saturating_sub(area_h);
         let mut rows: Vec<String> = flat[start..].iter().map(|r| r.text.clone()).collect();
         // Ensure the first visible row is always a header.
-        if let Some(first) = flat.get(start) {
-            if !rows.is_empty() { rows[0] = first.header.clone(); }
+        if let Some(first) = flat.get(start)
+            && !rows.is_empty()
+        {
+            rows[0] = first.header.clone();
         }
         rows
     };
@@ -291,7 +356,7 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     for row in &rows {
         ansi::move_to(out, 0, cur_y);
         let display = slice_line(row, 0, inner);
-        write!(out, "│{:<width$} │", display, width = inner).unwrap();
+        write!(out, "│{display:<inner$} │").unwrap();
         cur_y += 1;
     }
     let _ = cur_y;
@@ -299,7 +364,15 @@ pub fn draw_command_panel(out: &mut impl Write, w: u16, h: u16, path: &str, comm
     if max_scroll > 0 {
         let sb_top = top_y + 1 + path_h as u16;
         let sb_bot = top_y + panel_h as u16 - 1;
-        draw_scrollbar(out, w - 2, sb_top, sb_bot, sr_len, area_h, max_scroll - scroll);
+        draw_scrollbar(
+            out,
+            w - 2,
+            sb_top,
+            sb_bot,
+            sr_len,
+            area_h,
+            max_scroll - scroll,
+        );
     }
 }
 
@@ -311,7 +384,7 @@ mod tests {
     fn running_cmd(name: &str, ticks: u32) -> CommandEntry {
         let mut outputs = Vec::new();
         for i in (1..=ticks).rev() {
-            outputs.push(format!("{}s", i));
+            outputs.push(format!("{i}s"));
         }
         let refs: Vec<&str> = outputs.iter().map(String::as_str).collect();
         CommandEntry::fixture(name, &refs, CommandStatus::Running)
@@ -348,13 +421,13 @@ mod tests {
         // With area_h=5, count 3 consumes 4 rows (priority) and echo ok only
         // fits its header (1 remaining row). No content is technically hidden
         // since both blocks are represented.
-        let older  = simple_cmd("echo ok", "ok");
+        let older = simple_cmd("echo ok", "ok");
         let latest = running_cmd("count 3", 3);
         let blocks = build_blocks(&[older, latest], 40);
         let (rows, hidden) = build_priority_rows(&blocks, 5);
         assert!(!hidden);
-        assert_eq!(rows[0], "  ├─┬ echo ok");   // older header
-        assert_eq!(rows[1], "  ├─┬ count 3");   // newest header
+        assert_eq!(rows[0], "  ├─┬ echo ok"); // older header
+        assert_eq!(rows[1], "  ├─┬ count 3"); // newest header
         assert_eq!(rows[2], "  │ ├─ 3s");
         assert_eq!(rows[3], "  │ ├─ 2s");
         assert_eq!(rows[4], "  │ └─ 1s (running)");
@@ -373,7 +446,7 @@ mod tests {
 
     #[test]
     fn clip_keeps_result_and_hides_old_intermediates() {
-        let cmd   = running_cmd("count 5", 5);
+        let cmd = running_cmd("count 5", 5);
         let block = build_blocks(&[cmd], 40).remove(0);
         // Keep 4 rows: header + ??? + result
         let clipped = clip_block(&block, 4).unwrap();
@@ -403,28 +476,35 @@ mod tests {
     fn scroll_reveals_older_command() {
         let older = CommandEntry::fixture("test", &["command not found"], CommandStatus::Complete);
         let newer = running_cmd("count 4", 4);
-        let blocks = build_blocks(&[older, newer], 40);
+        let commands = vec![older, newer];
 
-        // scroll=2: remove the 2 most recent rows from newer
-        let clipped = clip_newest(&blocks, 2);
-        let flat    = flatten(&clipped);
-        let start   = flat.len().saturating_sub(4);
-        let mut rows: Vec<String> = flat[start..].iter().map(|r| r.text.clone()).collect();
-        if let Some(first) = flat.get(start) {
-            if !rows.is_empty() { rows[0] = first.header.clone(); }
-        }
-        assert_eq!(rows[0], "  ├─┬ test");
-        assert_eq!(rows[1], "  ├─┬ count 4");
+        // h=14 gives area_h=4 with 7 content rows, so max_scroll=3.
+        let mut buf = Vec::new();
+        draw_command_panel(&mut buf, 40, 14, "/tmp", &commands, 2);
+        let out = String::from_utf8_lossy(&buf);
+        assert!(
+            out.contains("├─┬ test"),
+            "older header must stay first: {out}"
+        );
+        assert!(
+            !out.contains("command not found"),
+            "older output must be scrolled off: {out}"
+        );
+        assert!(
+            out.contains("├─┬ count 4"),
+            "newer header must follow: {out}"
+        );
 
-        // scroll=3: remove 3 rows -> older becomes fully visible
-        let clipped2 = clip_newest(&blocks, 3);
-        let flat2    = flatten(&clipped2);
-        let start2   = flat2.len().saturating_sub(4);
-        let mut rows2: Vec<String> = flat2[start2..].iter().map(|r| r.text.clone()).collect();
-        if let Some(first) = flat2.get(start2) {
-            if !rows2.is_empty() { rows2[0] = first.header.clone(); }
-        }
-        assert_eq!(rows2[0], "  ├─┬ test");
-        assert_eq!(rows2[1], "  │ └─ command not found");
+        let mut buf = Vec::new();
+        draw_command_panel(&mut buf, 40, 14, "/tmp", &commands, 3);
+        let out = String::from_utf8_lossy(&buf);
+        assert!(
+            out.contains("├─┬ test"),
+            "older header must stay first: {out}"
+        );
+        assert!(
+            out.contains("└─ command not found"),
+            "scroll must reveal the older output: {out}"
+        );
     }
 }

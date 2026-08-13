@@ -5,7 +5,7 @@ use std::io::Write;
 
 use super::ansi;
 use super::window::Window;
-use crate::help::{wrapped, wrapped_count, HelpState};
+use crate::help::{HelpState, wrapped, wrapped_count};
 
 pub fn draw_help_content(out: &mut impl Write, win: &Window, state: &HelpState) {
     let lx = win.position_x;

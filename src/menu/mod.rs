@@ -1,8 +1,8 @@
 // Start menu manifest: declarative entries (label, kind, command, args,
 // cwd, desktop) loaded from the user config path.
 //
-// JSON is parsed by a hand-written zero-dependency parser (`serde` stays
-// commented in Cargo.toml), matching the portability policy of ARCHITECTURE.md.
+// JSON is parsed by a hand-written zero-dependency parser (`json.rs`),
+// matching the portability policy of ARCHITECTURE.md.
 
 use std::path::PathBuf;
 
@@ -35,11 +35,11 @@ impl MenuKind {
 
 #[derive(Debug, Clone)]
 pub struct MenuItem {
-    pub label:   String,
-    pub kind:    MenuKind,
+    pub label: String,
+    pub kind: MenuKind,
     pub command: String,
-    pub args:    Vec<String>,
-    pub cwd:     Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
     pub desktop: Option<usize>,
 }
 
@@ -67,15 +67,19 @@ impl MenuItem {
 
 /// Live state of the open start menu: entries plus keyboard selection.
 pub struct MenuState {
-    pub items:    Vec<MenuItem>,
+    pub items: Vec<MenuItem>,
     pub selected: usize,
     /// Rows scrolled off the top of the menu window.
-    pub scroll:   usize,
+    pub scroll: usize,
 }
 
 impl MenuState {
     pub fn new(items: Vec<MenuItem>) -> Self {
-        Self { items, selected: 0, scroll: 0 }
+        Self {
+            items,
+            selected: 0,
+            scroll: 0,
+        }
     }
 
     /// Keep the selected row inside the `visible` rows of the menu window.
@@ -164,7 +168,8 @@ fn item_from_json(json: &Json) -> Result<MenuItem, String> {
     };
 
     let field_str = |key: &str| -> Option<String> {
-        fields.iter()
+        fields
+            .iter()
             .find(|(name, _)| name == key)
             .and_then(|(_, value)| match value {
                 Json::Str(text) => Some(text.clone()),
@@ -205,7 +210,8 @@ fn item_from_json(json: &Json) -> Result<MenuItem, String> {
     }
 
     let cwd = field_str("cwd");
-    let desktop = fields.iter()
+    let desktop = fields
+        .iter()
         .find(|(name, _)| name == "desktop")
         .and_then(|(_, value)| match value {
             Json::Num(number) => Some(*number as i64),
@@ -213,7 +219,14 @@ fn item_from_json(json: &Json) -> Result<MenuItem, String> {
         })
         .map(|desktop| desktop.clamp(1, 4) as usize);
 
-    Ok(MenuItem { label, kind, command, args, cwd, desktop })
+    Ok(MenuItem {
+        label,
+        kind,
+        command,
+        args,
+        cwd,
+        desktop,
+    })
 }
 
 #[cfg(test)]
@@ -253,12 +266,15 @@ mod tests {
 
     #[test]
     fn manifest_object_root_with_items_key() {
-        let items = parse(r#"{
+        let items = parse(
+            r#"{
             "items": [
                 { "label": "A", "command": "top" },
                 { "label": "B", "kind": "command", "command": "dir" }
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].kind, MenuKind::App);
         assert_eq!(items[1].kind, MenuKind::Command);
@@ -273,11 +289,14 @@ mod tests {
 
     #[test]
     fn kind_defaults_and_case_insensitive() {
-        let items = parse(r#"[
+        let items = parse(
+            r#"[
             { "command": "x" },
             { "kind": "TERMINAL", "command": "" },
             { "kind": "run", "command": "y" }
-        ]"#).unwrap();
+        ]"#,
+        )
+        .unwrap();
         assert_eq!(items[0].kind, MenuKind::App);
         assert_eq!(items[1].kind, MenuKind::Terminal);
         assert_eq!(items[2].kind, MenuKind::Command);
@@ -292,11 +311,14 @@ mod tests {
 
     #[test]
     fn desktop_is_clamped() {
-        let items = parse(r#"[
+        let items = parse(
+            r#"[
             { "desktop": 0, "command": "a" },
             { "desktop": 9, "command": "b" },
             { "desktop": 2.9, "command": "c" }
-        ]"#).unwrap();
+        ]"#,
+        )
+        .unwrap();
         assert_eq!(items[0].desktop, Some(1));
         assert_eq!(items[1].desktop, Some(4));
         assert_eq!(items[2].desktop, Some(2));
@@ -304,7 +326,8 @@ mod tests {
 
     #[test]
     fn args_accept_single_string() {
-        let items = parse(r#"[{ "kind": "command", "command": "echo", "args": "olá mundo" }]"#).unwrap();
+        let items =
+            parse(r#"[{ "kind": "command", "command": "echo", "args": "olá mundo" }]"#).unwrap();
         assert_eq!(items[0].args, vec!["olá mundo"]);
         assert_eq!(items[0].command_line(), "echo olá mundo");
     }
@@ -365,14 +388,16 @@ mod tests {
 
     #[test]
     fn menu_state_selection_stays_visible() {
-        let items: Vec<MenuItem> = (0..10).map(|i| MenuItem {
-            label: format!("item {i}"),
-            kind: MenuKind::App,
-            command: String::new(),
-            args: Vec::new(),
-            cwd: None,
-            desktop: None,
-        }).collect();
+        let items: Vec<MenuItem> = (0..10)
+            .map(|i| MenuItem {
+                label: format!("item {i}"),
+                kind: MenuKind::App,
+                command: String::new(),
+                args: Vec::new(),
+                cwd: None,
+                desktop: None,
+            })
+            .collect();
 
         let mut state = MenuState::new(items);
         assert_eq!(state.scroll, 0);

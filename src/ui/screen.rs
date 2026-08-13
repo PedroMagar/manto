@@ -39,7 +39,11 @@ pub struct ScreenGrid {
 impl ScreenGrid {
     pub fn new(w: u16, h: u16) -> Self {
         let (w, h) = (w.max(1) as usize, h.max(1) as usize);
-        ScreenGrid { w, h, cells: vec![vec![Cell::default(); w]; h] }
+        ScreenGrid {
+            w,
+            h,
+            cells: vec![vec![Cell::default(); w]; h],
+        }
     }
 
     pub fn resize(&mut self, w: u16, h: u16) {
@@ -71,9 +75,14 @@ impl ScreenGrid {
     /// whose style is not captured through the writer).
     #[allow(dead_code)]
     pub fn set_cell(&mut self, x: u16, y: u16, ch: char) {
-        let mut cell = Cell::default();
-        cell.ch = ch;
-        self.set(x as usize, y as usize, cell);
+        self.set(
+            x as usize,
+            y as usize,
+            Cell {
+                ch,
+                ..Cell::default()
+            },
+        );
     }
 
     /// Write a cell with an explicit style.
@@ -121,7 +130,9 @@ impl ScreenGrid {
         let rmax = self.w.saturating_sub(1);
         let mut out = String::new();
         for y in top..=bottom {
-            let mut row: String = (left..=right.min(rmax)).map(|x| self.char_at(x, y)).collect();
+            let mut row: String = (left..=right.min(rmax))
+                .map(|x| self.char_at(x, y))
+                .collect();
             while row.ends_with(' ') {
                 row.pop();
             }
@@ -184,9 +195,10 @@ impl<'a, W: Write> StampWriter<'a, W> {
         let (x, y) = self.pos;
         let gx = x.saturating_add(self.xoff) as usize;
         let gy = y.saturating_add(self.yoff) as usize;
-        let mut cell = Cell::default();
-        cell.ch = ch;
-        cell.style = self.style;
+        let cell = Cell {
+            ch,
+            style: self.style,
+        };
         self.grid.set(gx, gy, cell);
         if x + 1 < self.grid.w as u16 {
             self.pos.0 = x + 1;
@@ -216,9 +228,20 @@ impl<'a, W: Write> StampWriter<'a, W> {
         match fin {
             b'H' | b'f' => {
                 let mut it = params.split(';');
-                let row: u16 = it.next().and_then(|p| p.parse().ok()).unwrap_or(1u16).saturating_sub(1);
-                let col: u16 = it.next().and_then(|p| p.parse().ok()).unwrap_or(1u16).saturating_sub(1);
-                self.pos = (col.min(self.grid.w as u16 - 1), row.min(self.grid.h as u16 - 1));
+                let row: u16 = it
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(1u16)
+                    .saturating_sub(1);
+                let col: u16 = it
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(1u16)
+                    .saturating_sub(1);
+                self.pos = (
+                    col.min(self.grid.w as u16 - 1),
+                    row.min(self.grid.h as u16 - 1),
+                );
             }
             b'J' => {
                 let mode: u16 = params.parse().unwrap_or(0);
@@ -344,7 +367,8 @@ fn apply_sgr(style: &mut Style, params: &str) {
                             it.next().and_then(|s| s.parse::<u16>().ok()),
                             it.next().and_then(|s| s.parse::<u16>().ok()),
                         ) {
-                            let c = Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8);
+                            let c =
+                                Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8);
                             if is_fg {
                                 style.fg = c;
                             } else {
@@ -371,9 +395,15 @@ mod tests {
 
     #[test]
     fn box_select_bounds() {
-        let s = BoxSelect { anchor: (2, 1), extent: (5, 3) };
+        let s = BoxSelect {
+            anchor: (2, 1),
+            extent: (5, 3),
+        };
         assert_eq!(s.bounds(), (2, 5, 1, 3));
-        let s = BoxSelect { anchor: (5, 3), extent: (2, 1) };
+        let s = BoxSelect {
+            anchor: (5, 3),
+            extent: (2, 1),
+        };
         assert_eq!(s.bounds(), (2, 5, 1, 3));
     }
 

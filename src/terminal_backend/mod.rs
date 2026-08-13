@@ -24,7 +24,12 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 pub trait TerminalBackend {
     type Id;
 
-    fn spawn(&mut self, program: &str, args: &[String], cwd: Option<&str>) -> Result<Self::Id, String>;
+    fn spawn(
+        &mut self,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Self::Id, String>;
     fn write(&mut self, id: Self::Id, data: &[u8]) -> Result<(), String>;
     fn resize(&mut self, id: Self::Id, cols: u16, rows: u16) -> Result<(), String>;
     fn kill(&mut self, id: Self::Id) -> Result<(), String>;
@@ -36,7 +41,7 @@ pub trait TerminalBackend {
 /// the multi-session contract visible.
 pub enum TerminalEvent<I> {
     Output { id: I, bytes: Vec<u8> },
-    Exit   { id: I, code: Option<i32> },
+    Exit { id: I, code: Option<i32> },
 }
 
 /// Update messages from the platform reader thread: raw output chunks exactly
@@ -52,8 +57,8 @@ pub enum TerminalUpdate {
 /// One session per terminal window. Raw input is forwarded via `write`,
 /// output is drained via `poll`.
 pub struct CommandSession {
-    receiver:       Receiver<TerminalUpdate>,
-    platform:       platform::PlatformCommand,
+    receiver: Receiver<TerminalUpdate>,
+    platform: platform::PlatformCommand,
     closed_streams: usize,
 }
 
@@ -95,7 +100,11 @@ impl CommandSession {
     /// Spawn a session running `program` with explicit arguments. This is the
     /// trait-compliant spawn: the platform renders the command line from the
     /// program and its args exactly as a typed command would be parsed.
-    pub fn spawn_with_args(program: &str, args: &[String], cwd: Option<&str>) -> Result<Self, String> {
+    pub fn spawn_with_args(
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Self, String> {
         let cwd = cwd.unwrap_or(".");
         let (tx, rx) = mpsc::channel();
         let platform = platform::spawn_argv(program, args, cwd, tx)?;
@@ -136,7 +145,7 @@ impl CommandSession {
         let _ = TerminalBackend::resize(self, (), cols, rows);
     }
 
-    /// Kill the session. Returns true if the process was killed.
+    /// Kill the session. Returns true when the kill request was dispatched.
     pub fn kill(&mut self) -> bool {
         TerminalBackend::kill(self, ()).is_ok()
     }
@@ -145,12 +154,6 @@ impl CommandSession {
     /// echo and full terminal semantics. False for the piped fallback.
     pub fn is_real_pty(&self) -> bool {
         self.platform.is_real_pty()
-    }
-
-    /// True once the session has fully exited.
-    #[allow(dead_code)]
-    pub fn is_closed(&self) -> bool {
-        self.closed_streams >= 1
     }
 
     /// Label of the backend in use (diagnostics/tests).
@@ -171,7 +174,12 @@ impl CommandSession {
 impl TerminalBackend for CommandSession {
     type Id = ();
 
-    fn spawn(&mut self, program: &str, args: &[String], cwd: Option<&str>) -> Result<Self::Id, String> {
+    fn spawn(
+        &mut self,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Self::Id, String> {
         let fresh = CommandSession::spawn_with_args(program, args, cwd)?;
         *self = fresh;
         Ok(())
@@ -197,7 +205,10 @@ impl TerminalBackend for CommandSession {
             events.push(TerminalEvent::Output { id: (), bytes });
         }
         if let Some(code) = poll.exit_code {
-            events.push(TerminalEvent::Exit { id: (), code: Some(code) });
+            events.push(TerminalEvent::Exit {
+                id: (),
+                code: Some(code),
+            });
         }
         events
     }
@@ -231,38 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn persistent_session_writes_and_reads() {
-        let cwd = std::env::current_dir().unwrap();
-        let cwd = cwd.to_string_lossy().to_string();
-        let mut session = CommandSession::spawn(default_shell(), &cwd).unwrap();
-
-        // Send a command that echoes a unique marker, followed by newline.
-        let marker = "manto_session_test_4711";
-        #[cfg(windows)]
-        let cmd = format!("echo {marker}\r\n");
-        #[cfg(not(windows))]
-        let cmd = format!("echo {marker}\n");
-        session.write(cmd.as_bytes());
-
-        let start = Instant::now();
-        let mut saw_marker = false;
-        while start.elapsed() < Duration::from_secs(5) {
-            let poll = session.poll();
-            for chunk in &poll.outputs {
-                if chunk.windows(marker.len()).any(|w| w == marker.as_bytes()) {
-                    saw_marker = true;
-                }
-            }
-            if saw_marker {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        assert!(saw_marker, "marker not echoed back by persistent session");
-    }
-
-    #[test]
     fn persistent_session_survives_multiple_commands() {
         let cwd = std::env::current_dir().unwrap();
         let cwd = cwd.to_string_lossy().to_string();
@@ -278,11 +257,16 @@ mod tests {
         let mut saw_first = false;
         while start.elapsed() < Duration::from_secs(5) {
             for chunk in &session.poll().outputs {
-                if chunk.windows(b"first_12345".len()).any(|w| w == b"first_12345") {
+                if chunk
+                    .windows(b"first_12345".len())
+                    .any(|w| w == b"first_12345")
+                {
                     saw_first = true;
                 }
             }
-            if saw_first { break; }
+            if saw_first {
+                break;
+            }
             thread::sleep(Duration::from_millis(20));
         }
 
@@ -291,15 +275,23 @@ mod tests {
         let mut saw_second = false;
         while start.elapsed() < Duration::from_secs(5) {
             for chunk in &session.poll().outputs {
-                if chunk.windows(b"second_67890".len()).any(|w| w == b"second_67890") {
+                if chunk
+                    .windows(b"second_67890".len())
+                    .any(|w| w == b"second_67890")
+                {
                     saw_second = true;
                 }
             }
-            if saw_second { break; }
+            if saw_second {
+                break;
+            }
             thread::sleep(Duration::from_millis(20));
         }
 
-        assert!(saw_first && saw_second, "session did not survive both commands");
+        assert!(
+            saw_first && saw_second,
+            "session did not survive both commands"
+        );
     }
 
     #[test]
@@ -307,13 +299,18 @@ mod tests {
         // The trait (ARCHITECTURE.md) must be usable as the backend boundary:
         // spawn with args, write, poll turning output into TerminalEvents,
         // resize and kill, all through a trait object.
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let mut backend: Box<dyn TerminalBackend<Id = ()>> =
             Box::new(CommandSession::spawn(default_shell(), &cwd).unwrap());
 
         // Re-host the session through the trait's spawn (explicit args).
         let empty_args: Vec<String> = Vec::new();
-        backend.spawn(default_shell(), &empty_args, Some(&cwd)).unwrap();
+        backend
+            .spawn(default_shell(), &empty_args, Some(&cwd))
+            .unwrap();
 
         let marker = "manto_trait_marker_2027";
         #[cfg(windows)]
@@ -349,7 +346,11 @@ mod tests {
         // if the shell already exited on its own.
         if !saw_exit_event {
             for _ in 0..50 {
-                if backend.poll().iter().any(|e| matches!(e, TerminalEvent::Exit { .. })) {
+                if backend
+                    .poll()
+                    .iter()
+                    .any(|e| matches!(e, TerminalEvent::Exit { .. }))
+                {
                     saw_exit_event = true;
                     break;
                 }

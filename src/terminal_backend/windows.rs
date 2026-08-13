@@ -8,12 +8,12 @@ use super::TerminalUpdate;
 // ── Windows ConPTY FFI types ──────────────────────────────────────────────────
 
 type Handle = *mut u8;
-type Bool   = i32;
-type Dword  = u32;
-type Long   = i32;
-type Word   = u16;
+type Bool = i32;
+type Dword = u32;
+type Long = i32;
+type Word = u16;
 
-const STD_INPUT_HANDLE:  Dword = 0xFFFFFFF6;
+const STD_INPUT_HANDLE: Dword = 0xFFFFFFF6;
 const STD_OUTPUT_HANDLE: Dword = 0xFFFFFFF5;
 
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING: Dword = 0x0004;
@@ -22,27 +22,35 @@ const EXTENDED_STARTUPINFO_PRESENT: Dword = 0x00080000;
 const WAIT_OBJECT_0: Dword = 0;
 
 #[repr(C)]
-struct Coord { x: i16, y: i16 }
+struct Coord {
+    x: i16,
+    y: i16,
+}
 
 #[repr(C)]
-struct SmallRect { left: i16, top: i16, right: i16, bottom: i16 }
+struct SmallRect {
+    left: i16,
+    top: i16,
+    right: i16,
+    bottom: i16,
+}
 
 #[repr(C)]
 struct ScreenBufInfo {
-    dw_size:                Coord,
-    dw_cursor_position:     Coord,
-    w_attributes:           Word,
-    sr_window:              SmallRect,
+    dw_size: Coord,
+    dw_cursor_position: Coord,
+    w_attributes: Word,
+    sr_window: SmallRect,
     dw_maximum_window_size: Coord,
 }
 
 #[repr(C)]
 #[allow(non_snake_case)]
 struct ProcessInformation {
-    h_process:    Handle,
-    h_thread:     Handle,
+    h_process: Handle,
+    h_thread: Handle,
     dw_process_id: Dword,
-    dw_thread_id:  Dword,
+    dw_thread_id: Dword,
 }
 
 /// Write a pointer value into a byte slice at the given offset (little-endian).
@@ -59,7 +67,11 @@ unsafe extern "system" {
     fn SetConsoleMode(h: Handle, mode: Dword) -> Bool;
     fn GetConsoleScreenBufferInfo(h: Handle, info: *mut ScreenBufInfo) -> Bool;
     fn CreatePseudoConsole(
-        size: Coord, hIn: Handle, hOut: Handle, dwFlags: Dword, ppc: *mut Handle,
+        size: Coord,
+        hIn: Handle,
+        hOut: Handle,
+        dwFlags: Dword,
+        ppc: *mut Handle,
     ) -> Long;
     fn ResizePseudoConsole(pc: Handle, size: Coord) -> Long;
     fn ClosePseudoConsole(pc: Handle) -> Long;
@@ -69,28 +81,46 @@ unsafe extern "system" {
     fn TerminateProcess(h: Handle, code: Dword) -> Bool;
     fn CloseHandle(h: Handle) -> Bool;
     fn CreateProcessW(
-        app_name: *const u16, cmd_line: *mut u16,
-        proc_attr: *mut u8, thread_attr: *mut u8,
-        inherit_handles: Bool, creation_flags: Dword,
-        env: *mut u8, cwd: *const u16,
-        startup_info: *const u8, process_info: *mut u8,
+        app_name: *const u16,
+        cmd_line: *mut u16,
+        proc_attr: *mut u8,
+        thread_attr: *mut u8,
+        inherit_handles: Bool,
+        creation_flags: Dword,
+        env: *mut u8,
+        cwd: *const u16,
+        startup_info: *const u8,
+        process_info: *mut u8,
     ) -> Bool;
     fn CreatePipe(
-        read_handle: *mut Handle, write_handle: *mut Handle,
-        attr: *mut u8, size: Dword,
+        read_handle: *mut Handle,
+        write_handle: *mut Handle,
+        attr: *mut u8,
+        size: Dword,
     ) -> Bool;
     fn InitializeProcThreadAttributeList(
-        attr: *mut u8, count: Dword, flags: Dword, size: *mut usize,
+        attr: *mut u8,
+        count: Dword,
+        flags: Dword,
+        size: *mut usize,
     ) -> Bool;
     fn UpdateProcThreadAttribute(
-        attr: *mut u8, flags: Dword, attribute: Dword,
-        value: *mut u8, size: usize, prev: *mut u8, ret_size: *mut u8,
+        attr: *mut u8,
+        flags: Dword,
+        attribute: Dword,
+        value: *mut u8,
+        size: usize,
+        prev: *mut u8,
+        ret_size: *mut u8,
     ) -> Bool;
     fn DeleteProcThreadAttributeList(attr: *mut u8);
     fn MultiByteToWideChar(
-        code_page: Dword, flags: Dword,
-        multi: *const u8, multi_len: i32,
-        wide: *mut u16, wide_len: i32,
+        code_page: Dword,
+        flags: Dword,
+        multi: *const u8,
+        multi_len: i32,
+        wide: *mut u16,
+        wide_len: i32,
     ) -> i32;
 }
 
@@ -104,16 +134,24 @@ fn oem_to_utf8(bytes: &[u8]) -> Vec<u8> {
     }
     unsafe {
         let n = MultiByteToWideChar(
-            CP_OEMCP, 0, bytes.as_ptr() as *const u8, bytes.len() as i32,
-            std::ptr::null_mut(), 0,
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            std::ptr::null_mut(),
+            0,
         );
         if n <= 0 {
             return bytes.to_vec();
         }
         let mut wide = vec![0u16; n as usize];
         let out = MultiByteToWideChar(
-            CP_OEMCP, 0, bytes.as_ptr() as *const u8, bytes.len() as i32,
-            wide.as_mut_ptr(), n,
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            wide.as_mut_ptr(),
+            n,
         );
         if out <= 0 {
             return bytes.to_vec();
@@ -133,15 +171,15 @@ fn oem_to_utf8(bytes: &[u8]) -> Vec<u8> {
 
 /// A persistent shell session hosted by a Windows Pseudo Console (ConPTY).
 pub struct ConPtySession {
-    pc:           Handle,
-    in_read:      Handle,
-    in_write:     Handle,
-    out_read:     Handle,
-    out_write:    Handle,
-    process:      Handle,
-    input_tx:     Sender<Vec<u8>>,
+    pc: Handle,
+    in_read: Handle,
+    in_write: Handle,
+    out_read: Handle,
+    out_write: Handle,
+    process: Handle,
+    input_tx: Sender<Vec<u8>>,
     input_thread: Option<thread::JoinHandle<()>>,
-    closed:       bool,
+    closed: bool,
 }
 
 impl ConPtySession {
@@ -174,10 +212,13 @@ impl ConPtySession {
 
     fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
         unsafe {
-            let size = Coord { x: cols as i16, y: rows as i16 };
+            let size = Coord {
+                x: cols as i16,
+                y: rows as i16,
+            };
             let hr = ResizePseudoConsole(self.pc, size);
             if hr != 0 {
-                return Err(format!("ResizePseudoConsole failed: 0x{:X}", hr));
+                return Err(format!("ResizePseudoConsole failed: 0x{hr:X}"));
             }
         }
         Ok(())
@@ -191,19 +232,33 @@ impl Drop for ConPtySession {
             let _ = t.join();
         }
         unsafe {
-            if !self.pc.is_null() { let _ = ClosePseudoConsole(self.pc); }
-            if !self.in_read.is_null() { let _ = CloseHandle(self.in_read); }
-            if !self.in_write.is_null() { let _ = CloseHandle(self.in_write); }
-            if !self.out_read.is_null() { let _ = CloseHandle(self.out_read); }
-            if !self.out_write.is_null() { let _ = CloseHandle(self.out_write); }
-            if !self.process.is_null() && !self.closed { let _ = CloseHandle(self.process); }
+            if !self.pc.is_null() {
+                let _ = ClosePseudoConsole(self.pc);
+            }
+            if !self.in_read.is_null() {
+                let _ = CloseHandle(self.in_read);
+            }
+            if !self.in_write.is_null() {
+                let _ = CloseHandle(self.in_write);
+            }
+            if !self.out_read.is_null() {
+                let _ = CloseHandle(self.out_read);
+            }
+            if !self.out_write.is_null() {
+                let _ = CloseHandle(self.out_write);
+            }
+            if !self.process.is_null() && !self.closed {
+                let _ = CloseHandle(self.process);
+            }
         }
     }
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn close_handle(h: Handle) {
-    if !h.is_null() { let _ = CloseHandle(h); }
+    if !h.is_null() {
+        let _ = CloseHandle(h);
+    }
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -223,7 +278,7 @@ fn quote_program(program: &str) -> String {
     if program.trim().is_empty() {
         format!("\"{}\"", get_shell_path())
     } else {
-        format!("\"{}\"", program)
+        format!("\"{program}\"")
     }
 }
 
@@ -357,11 +412,12 @@ fn try_spawn_conpty(
             attr_list.as_mut_ptr(),
             0,
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-            pc_handle as *mut u8,
+            pc_handle,
             std::mem::size_of::<Handle>(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-        ) == 0 {
+        ) == 0
+        {
             DeleteProcThreadAttributeList(attr_list.as_mut_ptr());
             cleanup_conpty_failed(in_read, in_write, out_read, out_write);
             let _ = ClosePseudoConsole(pc_handle);
@@ -407,9 +463,17 @@ fn try_spawn_conpty(
         let input_thread = thread::spawn(move || {
             let in_write_h = in_write_usize as Handle;
             while let Ok(data) = input_rx.recv() {
-                if data.is_empty() { break; }
+                if data.is_empty() {
+                    break;
+                }
                 let mut written: Dword = 0;
-                let _ = WriteFile(in_write_h, data.as_ptr(), data.len() as Dword, &mut written, std::ptr::null_mut());
+                let _ = WriteFile(
+                    in_write_h,
+                    data.as_ptr(),
+                    data.len() as Dword,
+                    &mut written,
+                    std::ptr::null_mut(),
+                );
             }
         });
 
@@ -422,13 +486,24 @@ fn try_spawn_conpty(
             let mut buf = [0u8; 4096];
             loop {
                 let mut read: Dword = 0;
-                let ret = ReadFile(out_read_h, buf.as_mut_ptr(), buf.len() as Dword, &mut read, std::ptr::null_mut());
+                let ret = ReadFile(
+                    out_read_h,
+                    buf.as_mut_ptr(),
+                    buf.len() as Dword,
+                    &mut read,
+                    std::ptr::null_mut(),
+                );
                 if ret == 0 || read == 0 {
-                    if WaitForSingleObject(process_h, 0) == WAIT_OBJECT_0 { break; }
+                    if WaitForSingleObject(process_h, 0) == WAIT_OBJECT_0 {
+                        break;
+                    }
                     std::thread::sleep(std::time::Duration::from_micros(200));
                     continue;
                 }
-                if tx.send(TerminalUpdate::Output(oem_to_utf8(&buf[..read as usize]))).is_err() {
+                if tx
+                    .send(TerminalUpdate::Output(oem_to_utf8(&buf[..read as usize])))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -437,7 +512,7 @@ fn try_spawn_conpty(
 
         Some(ConPtySession {
             pc: pc_handle,
-            in_read: std::ptr::null_mut(),  // closed above
+            in_read: std::ptr::null_mut(), // closed above
             in_write,
             out_read,
             out_write: std::ptr::null_mut(), // closed above
@@ -451,7 +526,10 @@ fn try_spawn_conpty(
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn cleanup_conpty_failed(
-    in_read: Handle, in_write: Handle, out_read: Handle, out_write: Handle,
+    in_read: Handle,
+    in_write: Handle,
+    out_read: Handle,
+    out_write: Handle,
 ) {
     close_handle(in_read);
     close_handle(in_write);
@@ -459,7 +537,6 @@ unsafe fn cleanup_conpty_failed(
     close_handle(out_write);
 }
 
-/// Forward raw bytes from a pipe/stream to the emulator exactly as read.
 /// Forward bytes from a pipe to the emulator, OEM-decoded to UTF-8. CR/LF and
 /// ANSI sequences are preserved for the parser to interpret.
 fn read_raw_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
@@ -468,7 +545,10 @@ fn read_raw_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if tx.send(TerminalUpdate::Output(oem_to_utf8(&buf[..n]))).is_err() {
+                if tx
+                    .send(TerminalUpdate::Output(oem_to_utf8(&buf[..n])))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -478,7 +558,6 @@ fn read_raw_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
     }
 }
 
-
 // ── Pipe backend (fallback for hosts where ConPTY cannot attach) ──────────────
 
 /// A persistent shell session driven through anonymous pipes.
@@ -487,15 +566,17 @@ fn read_raw_stream<R: Read>(mut stream: R, tx: &Sender<TerminalUpdate>) {
 /// `powershell.exe -NoExit -Command -` keeps reading commands from stdin and
 /// preserves shell state (cwd, environment) between writes.
 pub struct PipeSession {
-    child:          Option<Child>,
-    input_tx:       Sender<Vec<u8>>,
-    input_thread:   Option<thread::JoinHandle<()>>,
-    closed:         bool,
+    child: Option<Child>,
+    input_tx: Sender<Vec<u8>>,
+    input_thread: Option<thread::JoinHandle<()>>,
+    closed: bool,
 }
 
 impl PipeSession {
     fn try_wait(&mut self) -> Option<i32> {
-        let code = self.child.as_mut()
+        let code = self
+            .child
+            .as_mut()
             .and_then(|c| c.try_wait().ok().flatten())
             .map(|s| s.code().unwrap_or_default());
         if code.is_some() {
@@ -565,7 +646,8 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .creation_flags(CREATE_NO_WINDOW);
-            cmd.spawn().map_err(|err| format!("failed to spawn {shell}: {err}"))?
+            cmd.spawn()
+                .map_err(|err| format!("failed to spawn {shell}: {err}"))?
         }
     };
 
@@ -575,7 +657,11 @@ fn spawn_pipe(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pi
 /// Piped fallback for a program session: run the program through `cmd` so
 /// app-execution aliases and shell builtins resolve like they would in a
 /// real terminal. The program is never replaced by a generic shell.
-fn spawn_app_pipe(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PipeSession, String> {
+fn spawn_app_pipe(
+    program: &str,
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PipeSession, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -587,7 +673,9 @@ fn spawn_app_pipe(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    let child = cmd.spawn().map_err(|err| format!("failed to spawn program: {err}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|err| format!("failed to spawn program: {err}"))?;
 
     Ok(wire_pipe(child, tx))
 }
@@ -604,7 +692,9 @@ fn wire_pipe(mut child: Child, tx: Sender<TerminalUpdate>) -> PipeSession {
     let input_thread = thread::spawn(move || {
         let mut stdin = stdin;
         while let Ok(data) = input_rx.recv() {
-            if data.is_empty() { break; }
+            if data.is_empty() {
+                break;
+            }
             let _ = stdin.write_all(&data);
             let _ = stdin.flush();
         }
@@ -717,10 +807,10 @@ fn conpty_is_viable(command: &str, cwd: &str) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
     while std::time::Instant::now() < deadline {
         while let Ok(upd) = prx.try_recv() {
-            if let TerminalUpdate::Output(chunk) = upd {
-                if chunk.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()) {
-                    return true;
-                }
+            if let TerminalUpdate::Output(chunk) = upd
+                && chunk.windows(MARKER.len()).any(|w| w == MARKER.as_bytes())
+            {
+                return true;
             }
         }
         if probe.child_exited() {
@@ -733,13 +823,15 @@ fn conpty_is_viable(command: &str, cwd: &str) -> bool {
 
 /// Spawn a persistent shell session, preferring ConPTY and falling back to
 /// anonymous pipes when the host cannot attach a child to a pseudo console.
-pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+pub fn spawn(
+    command: &str,
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     let command = resolve_program(command);
     let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&command, cwd));
-    if viable {
-        if let Some(conpty) = try_spawn_conpty(&quote_program(&command), cwd, tx.clone()) {
-            return Ok(PlatformCommand::Conpty(conpty));
-        }
+    if viable && let Some(conpty) = try_spawn_conpty(&quote_program(&command), cwd, tx.clone()) {
+        return Ok(PlatformCommand::Conpty(conpty));
     }
     Ok(PlatformCommand::Pipe(spawn_pipe(&command, cwd, tx)?))
 }
@@ -748,13 +840,17 @@ pub fn spawn(command: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<Pla
 /// piped fallback runs the program through `cmd` so aliases and builtins
 /// resolve the way a shell would resolve them — the requested program is
 /// never silently replaced.
-pub fn spawn_app(program: &str, cwd: &str, tx: Sender<TerminalUpdate>) -> Result<PlatformCommand, String> {
+pub fn spawn_app(
+    program: &str,
+    cwd: &str,
+    tx: Sender<TerminalUpdate>,
+) -> Result<PlatformCommand, String> {
     let program = resolve_program(program);
     let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&program, cwd));
-    if viable {
-        if let Some(conpty) = try_spawn_conpty(&render_cmdline(&program, &[]), cwd, tx.clone()) {
-            return Ok(PlatformCommand::Conpty(conpty));
-        }
+    if viable
+        && let Some(conpty) = try_spawn_conpty(&render_cmdline(&program, &[]), cwd, tx.clone())
+    {
+        return Ok(PlatformCommand::Conpty(conpty));
     }
     Ok(PlatformCommand::Pipe(spawn_app_pipe(&program, cwd, tx)?))
 }
@@ -773,10 +869,8 @@ pub fn spawn_argv(
     let program = resolve_program(program);
     let cmdline = render_cmdline(&program, args);
     let viable = *CONPTY_VIABLE.get_or_init(|| conpty_is_viable(&program, cwd));
-    if viable {
-        if let Some(conpty) = try_spawn_conpty(&cmdline, cwd, tx.clone()) {
-            return Ok(PlatformCommand::Conpty(conpty));
-        }
+    if viable && let Some(conpty) = try_spawn_conpty(&cmdline, cwd, tx.clone()) {
+        return Ok(PlatformCommand::Conpty(conpty));
     }
     Ok(PlatformCommand::Pipe(spawn_app_pipe(&cmdline, cwd, tx)?))
 }
@@ -789,7 +883,10 @@ mod tests {
     fn fallback_pipe_echoes_session_output() {
         // On a ConPTY-less host the piped fallback must still execute commands
         // and return their output to the emulator.
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let (tx, rx) = std::sync::mpsc::channel::<TerminalUpdate>();
         let mut s = spawn("", &cwd, tx).unwrap();
         let _ = s.write(b"echo PIPE_PROG_77\r");
@@ -805,7 +902,9 @@ mod tests {
                     }
                 }
             }
-            if found { break; }
+            if found {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(found, "piped fallback did not run/echo the sent command");
@@ -839,7 +938,9 @@ mod tests {
                     bytes.extend_from_slice(&chunk);
                 }
             }
-            if bytes.windows(2).any(|w| w == b"X\n") { break; }
+            if bytes.windows(2).any(|w| w == b"X\n") {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -854,12 +955,15 @@ mod tests {
 
     #[test]
     fn conpty_probe_does_not_poison_following_pipe() {
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
 
         fn probe_echo(idx: u32, cwd: &str) -> Result<(), String> {
             let (tx, rx) = std::sync::mpsc::channel::<TerminalUpdate>();
             let mut s = spawn("", cwd, tx).map_err(|e| format!("spawn[{idx}] err {e}"))?;
-            let cmd = format!("echo POISONMARK{}\r", idx);
+            let cmd = format!("echo POISONMARK{idx}\r");
             s.write(cmd.as_bytes()).map_err(|e| e.to_string())?;
             let start = std::time::Instant::now();
             let mut got = Vec::new();
@@ -881,7 +985,6 @@ mod tests {
         // The first spawn runs the ConPTY probe (cached). Check the second.
         let _ = probe_echo(1, &cwd);
         let r2 = probe_echo(2, &cwd);
-        eprintln!("DEBUG second session result: {:?}", r2);
         assert!(r2.is_ok(), "second session after probe failed: {r2:?}");
     }
 
@@ -889,18 +992,22 @@ mod tests {
     fn pipe_fallback_persistent_session_works() {
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
             use std::io::{BufRead, BufReader};
+            use std::os::windows::process::CommandExt;
             let cwd = std::env::current_dir().unwrap();
             let cwd_s = cwd.to_string_lossy().to_string();
 
             let variants: [(&str, &[&str], u32); 3] = [
-                ("cmd.exe", &["/Q"], 0x08000000),                       // CREATE_NO_WINDOW
-                ("cmd.exe", &["/Q"], 0x08000000 | 0x00000100),          // + CREATE_NEW_CONSOLE
-                ("powershell.exe", &["-NoLogo", "-NoExit", "-Command", "-"], 0x08000000),
+                ("cmd.exe", &["/Q"], 0x08000000),              // CREATE_NO_WINDOW
+                ("cmd.exe", &["/Q"], 0x08000000 | 0x00000100), // + CREATE_NEW_CONSOLE
+                (
+                    "powershell.exe",
+                    &["-NoLogo", "-NoExit", "-Command", "-"],
+                    0x08000000,
+                ),
             ];
 
-            for (i, (prog, args, flags)) in variants.iter().enumerate() {
+            for (prog, args, flags) in variants.iter() {
                 let (tx2, rx2) = std::sync::mpsc::channel::<Vec<u8>>();
                 let mut cmd = std::process::Command::new(prog);
                 cmd.args(*args)
@@ -911,14 +1018,16 @@ mod tests {
                     .creation_flags(*flags);
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
-                    Err(e) => { eprintln!("variant {i} spawn err: {e}"); continue; }
+                    Err(_) => continue,
                 };
                 let mut stdin = child.stdin.take().unwrap();
                 let stdout = child.stdout.take().unwrap();
                 let mut reader = BufReader::new(stdout);
                 let th = thread::spawn(move || {
                     while let Ok(data) = rx2.recv() {
-                        if data.is_empty() { break; }
+                        if data.is_empty() {
+                            break;
+                        }
                         let _ = stdin.write_all(&data);
                         let _ = stdin.flush();
                     }
@@ -935,13 +1044,14 @@ mod tests {
                         Ok(_) => all.push_str(&line),
                         Err(_) => break,
                     }
-                    if all.contains("PITEST5511") { break; }
+                    if all.contains("PITEST5511") {
+                        break;
+                    }
                 }
                 let _ = tx2.send(Vec::new());
                 let _ = th.join();
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("variant {i} ({prog} flags={flags}): output={:?}", all);
                 if all.contains("PITEST5511") {
                     return;
                 }
@@ -957,7 +1067,10 @@ mod tests {
     #[test]
     fn resolve_program_keeps_explicit_paths_intact() {
         assert_eq!(resolve_program(""), "");
-        assert_eq!(resolve_program(r"C:\tools\foo.exe -a"), r"C:\tools\foo.exe -a");
+        assert_eq!(
+            resolve_program(r"C:\tools\foo.exe -a"),
+            r"C:\tools\foo.exe -a"
+        );
         assert_eq!(
             resolve_program("\"C:\\Program Files\\x\\y.exe\" --flag"),
             "\"C:\\Program Files\\x\\y.exe\" --flag",
@@ -970,8 +1083,14 @@ mod tests {
         // cmd.exe resolves to its System32 location, unchanged when already
         // an absolute path, and keeps any trailing arguments.
         let resolved = resolve_program("cmd.exe");
-        assert!(resolved.to_ascii_lowercase().ends_with("cmd.exe"), "unresolved: {resolved}");
-        assert!(resolved.to_ascii_lowercase().contains("system32"), "expected a real path: {resolved}");
+        assert!(
+            resolved.to_ascii_lowercase().ends_with("cmd.exe"),
+            "unresolved: {resolved}"
+        );
+        assert!(
+            resolved.to_ascii_lowercase().contains("system32"),
+            "expected a real path: {resolved}"
+        );
 
         let with_args = resolve_program("cmd.exe /C doskey");
         let lower = with_args.to_ascii_lowercase();
@@ -984,7 +1103,10 @@ mod tests {
     #[test]
     fn spawn_app_runs_the_requested_program() {
         use crate::terminal_backend::CommandSession;
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let program = "cmd.exe";
 
         let mut app = CommandSession::spawn_app(program, &cwd).unwrap();
@@ -1006,6 +1128,9 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        assert!(saw_marker, "requested program session did not echo the marker");
+        assert!(
+            saw_marker,
+            "requested program session did not echo the marker"
+        );
     }
 }

@@ -8,36 +8,43 @@ use std::collections::VecDeque;
 
 // ── Color & attributes ───────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Color {
+    #[default]
     Default,
     Indexed(u8),
     Rgb(u8, u8, u8),
-}
-
-impl Default for Color {
-    fn default() -> Self { Color::Default }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Attributes(u16);
 
 impl Attributes {
-    pub const BOLD: u16      = 1 << 0;
-    pub const DIM: u16       = 1 << 1;
-    pub const ITALIC: u16    = 1 << 2;
+    pub const BOLD: u16 = 1 << 0;
+    pub const DIM: u16 = 1 << 1;
+    pub const ITALIC: u16 = 1 << 2;
     pub const UNDERLINE: u16 = 1 << 3;
-    pub const BLINK: u16     = 1 << 4;
-    pub const REVERSE: u16   = 1 << 5;
-    pub const HIDDEN: u16    = 1 << 6;
-    pub const STRIKE: u16    = 1 << 7;
+    pub const BLINK: u16 = 1 << 4;
+    pub const REVERSE: u16 = 1 << 5;
+    pub const HIDDEN: u16 = 1 << 6;
+    pub const STRIKE: u16 = 1 << 7;
 
     pub fn set(&mut self, flag: u16, on: bool) {
-        if on { self.0 |= flag; } else { self.0 &= !flag; }
+        if on {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
     }
-    pub fn has(&self, flag: u16) -> bool { self.0 & flag != 0 }
-    pub fn clear(&mut self) { self.0 = 0; }
-    pub fn is_empty(&self) -> bool { self.0 == 0 }
+    pub fn has(&self, flag: u16) -> bool {
+        self.0 & flag != 0
+    }
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
 }
 
 /// A renderable style (foreground, background, attributes).
@@ -64,7 +71,10 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ', style: Style::default() }
+        Cell {
+            ch: ' ',
+            style: Style::default(),
+        }
     }
 }
 
@@ -108,11 +118,15 @@ impl Screen {
     fn new(cols: u16, rows: u16) -> Self {
         let cols = (cols as usize).max(2);
         let rows = (rows as usize).max(2);
-        Screen { cells: vec![Cell::default(); cols * rows] }
+        Screen {
+            cells: vec![Cell::default(); cols * rows],
+        }
     }
 
     fn clear(&mut self) {
-        for c in self.cells.iter_mut() { *c = Cell::default(); }
+        for c in self.cells.iter_mut() {
+            *c = Cell::default();
+        }
     }
 }
 
@@ -139,10 +153,14 @@ struct Params {
 }
 
 impl Params {
-    fn new(v: Vec<u32>) -> Self { Params { inner: v, idx: 0 } }
+    fn new(v: Vec<u32>) -> Self {
+        Params { inner: v, idx: 0 }
+    }
     fn next(&mut self) -> Option<u32> {
         let v = self.inner.get(self.idx).copied();
-        if v.is_some() { self.idx += 1; }
+        if v.is_some() {
+            self.idx += 1;
+        }
         v
     }
 }
@@ -158,8 +176,16 @@ impl Terminal {
             alt: Screen::new(cols, rows),
             scrollback: VecDeque::new(),
             max_scrollback: DEFAULT_SCROLLBACK,
-            cursor: Cursor { x: 0, y: 0, visible: true },
-            saved_cursor: Cursor { x: 0, y: 0, visible: true },
+            cursor: Cursor {
+                x: 0,
+                y: 0,
+                visible: true,
+            },
+            saved_cursor: Cursor {
+                x: 0,
+                y: 0,
+                visible: true,
+            },
             style: Style::default(),
             scroll_region_top: 0,
             scroll_region_bottom: rows - 1,
@@ -175,12 +201,20 @@ impl Terminal {
 
     // ── Public accessors (used by the view) ────────────────────────────────
 
-    pub fn cols(&self) -> u16 { self.cols }
-    pub fn rows(&self) -> u16 { self.rows }
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
     /// Rows pushed out of the main screen into scrollback.
-    pub fn scrollback_len(&self) -> usize { self.scrollback.len() }
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
     /// Total absolute rows = scrollback + visible screen.
-    pub fn total_lines(&self) -> usize { self.scrollback.len() + self.rows as usize }
+    pub fn total_lines(&self) -> usize {
+        self.scrollback.len() + self.rows as usize
+    }
     /// Fetch an absolute row (0 = oldest). The first `scrollback_len()` rows
     /// live in scrollback; the rest map onto the live screen.
     pub fn line_at(&self, abs: usize) -> &[Cell] {
@@ -189,13 +223,21 @@ impl Terminal {
             &self.scrollback[abs]
         } else {
             let r = abs.saturating_sub(self.scrollback.len());
-            let cells = if self.alt_active { &self.alt.cells } else { &self.main.cells };
+            let cells = if self.alt_active {
+                &self.alt.cells
+            } else {
+                &self.main.cells
+            };
             &cells[r * cols..(r + 1) * cols]
         }
     }
     /// Live screen cursor (column, row) in 0-based screen coordinates.
-    pub fn cursor_pos(&self) -> (u16, u16) { (self.cursor.x, self.cursor.y) }
-    pub fn cursor_visible(&self) -> bool { self.cursor.visible }
+    pub fn cursor_pos(&self) -> (u16, u16) {
+        (self.cursor.x, self.cursor.y)
+    }
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor.visible
+    }
     #[allow(dead_code)]
     pub fn line_as_text(&self, abs: usize) -> String {
         self.line_at(abs).iter().map(|c| c.ch).collect()
@@ -229,7 +271,9 @@ impl Terminal {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(2);
         let rows = rows.max(2);
-        if cols == self.cols && rows == self.rows { return; }
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
 
         let mut all: Vec<Vec<Cell>> = Vec::new();
         for a in 0..self.total_lines() {
@@ -259,8 +303,7 @@ impl Terminal {
         }
         for (i, line) in all.into_iter().enumerate() {
             if i < rows as usize {
-                self.main.cells[i * cols as usize..(i + 1) * cols as usize]
-                    .copy_from_slice(&line);
+                self.main.cells[i * cols as usize..(i + 1) * cols as usize].copy_from_slice(&line);
             }
         }
 
@@ -282,23 +325,27 @@ impl Terminal {
     // ── Screen routing ─────────────────────────────────────────────────────
 
     fn active_cells_mut(&mut self) -> &mut [Cell] {
-        if self.alt_active { &mut self.alt.cells } else { &mut self.main.cells }
+        if self.alt_active {
+            &mut self.alt.cells
+        } else {
+            &mut self.main.cells
+        }
     }
 
     // ── Ground / C0 control handlers ───────────────────────────────────────
 
     fn control(&mut self, b: u8) {
         match b {
-            0x07 => {}                           // BEL: ignored
+            0x07 => {}                                               // BEL: ignored
             0x08 => self.cursor.x = self.cursor.x.saturating_sub(1), // BS
             0x09 => {
                 // HT: next multiple of 8
                 let next = ((self.cursor.x as usize / 8) + 1) * 8;
                 self.cursor.x = (next as u16).min(self.cols - 1);
             }
-            0x0a | 0x0b | 0x0c => self.line_feed(), // LF / VT / FF
+            0x0a..=0x0c => self.line_feed(), // LF / VT / FF
             0x0d => {
-                self.cursor.x = 0;                 // CR cancels pending wrap
+                self.cursor.x = 0; // CR cancels pending wrap
                 self.pending_wrap = false;
             }
             _ => {}
@@ -312,9 +359,14 @@ impl Terminal {
             0xC2..=0xDF => 2,
             0xE0..=0xEF => 3,
             0xF0..=0xF4 => 4,
-            _ => { self.utf8_pending.clear(); return; }
+            _ => {
+                self.utf8_pending.clear();
+                return;
+            }
         };
-        if self.utf8_pending.len() < n { return; }
+        if self.utf8_pending.len() < n {
+            return;
+        }
 
         if n == 1 {
             self.write_char(self.utf8_pending[0] as char);
@@ -322,17 +374,18 @@ impl Terminal {
             let mut cp: u32 = match self.utf8_pending[0] {
                 0xC2..=0xDF => (self.utf8_pending[0] & 0x1F) as u32,
                 0xE0..=0xEF => (self.utf8_pending[0] & 0x0F) as u32,
-                _           => (self.utf8_pending[0] & 0x07) as u32,
+                _ => (self.utf8_pending[0] & 0x07) as u32,
             };
             let mut ok = true;
             for &c in &self.utf8_pending[1..n] {
-                if c & 0xC0 != 0x80 { ok = false; break; }
+                if c & 0xC0 != 0x80 {
+                    ok = false;
+                    break;
+                }
                 cp = (cp << 6) | (c & 0x3F) as u32;
             }
-            if ok {
-                if let Some(ch) = char::from_u32(cp) {
-                    self.write_char(ch);
-                }
+            if ok && let Some(ch) = char::from_u32(cp) {
+                self.write_char(ch);
             }
         }
         self.utf8_pending.clear();
@@ -423,7 +476,7 @@ impl Terminal {
     // ── CSI state ──────────────────────────────────────────────────────────
 
     fn csi_byte(&mut self, b: u8) {
-        if b >= 0x40 && b <= 0x7e {
+        if (0x40..=0x7e).contains(&b) {
             let cs = std::mem::take(&mut self.csi);
             self.dispatch_csi(cs, b);
             self.parse = ParseState::Ground;
@@ -453,7 +506,9 @@ impl Terminal {
                 cur = Some(cur.unwrap_or(0) * 10 + t);
             }
         }
-        if let Some(v) = cur { params.push(v); }
+        if let Some(v) = cur {
+            params.push(v);
+        }
 
         let private = cs.private;
         let mut p = Params::new(params.clone());
@@ -517,7 +572,11 @@ impl Terminal {
                     match *m {
                         25 => self.cursor.visible = on,
                         1049 => {
-                            if on { self.enter_alt(); } else { self.leave_alt(); }
+                            if on {
+                                self.enter_alt();
+                            } else {
+                                self.leave_alt();
+                            }
                         }
                         7 => self.wrap = on,
                         _ => {}
@@ -636,7 +695,11 @@ impl Terminal {
     }
 
     fn fill(&mut self, from: usize, to: usize) {
-        let cells_len = if self.alt_active { self.alt.cells.len() } else { self.main.cells.len() };
+        let cells_len = if self.alt_active {
+            self.alt.cells.len()
+        } else {
+            self.main.cells.len()
+        };
         let to = to.max(from).min(cells_len);
         let style = self.style;
         let cells = self.active_cells_mut();
@@ -649,14 +712,22 @@ impl Terminal {
     // ── Alternate screen ───────────────────────────────────────────────────
 
     fn enter_alt(&mut self) {
-        if self.alt_active { return; }
+        if self.alt_active {
+            return;
+        }
         self.alt_active = true;
         self.alt.clear();
-        self.cursor = Cursor { x: 0, y: 0, visible: true };
+        self.cursor = Cursor {
+            x: 0,
+            y: 0,
+            visible: true,
+        };
     }
 
     fn leave_alt(&mut self) {
-        if !self.alt_active { return; }
+        if !self.alt_active {
+            return;
+        }
         self.alt_active = false;
         self.cursor = self.saved_cursor;
     }
@@ -693,13 +764,25 @@ impl Terminal {
                         Some(5) => {
                             if let Some(n) = p.next() {
                                 let c = Color::Indexed((n % 256) as u8);
-                                if is_fg { self.style.fg = c; } else { self.style.bg = c; }
+                                if is_fg {
+                                    self.style.fg = c;
+                                } else {
+                                    self.style.bg = c;
+                                }
                             }
                         }
                         Some(2) => {
                             if let (Some(r), Some(g), Some(b)) = (p.next(), p.next(), p.next()) {
-                                let c = Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8);
-                                if is_fg { self.style.fg = c; } else { self.style.bg = c; }
+                                let c = Color::Rgb(
+                                    r.min(255) as u8,
+                                    g.min(255) as u8,
+                                    b.min(255) as u8,
+                                );
+                                if is_fg {
+                                    self.style.fg = c;
+                                } else {
+                                    self.style.bg = c;
+                                }
                             }
                         }
                         _ => {}
@@ -724,7 +807,9 @@ mod tests {
         Terminal::new(10, 4)
     }
 
-    fn first_line(t: &Terminal) -> String { row(t, 0) }
+    fn first_line(t: &Terminal) -> String {
+        row(t, 0)
+    }
 
     fn row(t: &Terminal, abs: usize) -> String {
         t.line_as_text(abs).trim_end().to_string()

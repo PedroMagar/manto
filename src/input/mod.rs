@@ -4,11 +4,16 @@ mod history;
 
 pub use history::History;
 
+use crate::cmd::CommandEntry;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use crate::cmd::CommandEntry;
 
-pub fn history_up(commands: &[CommandEntry], input: &mut String, index: &mut Option<usize>, draft: &mut Option<String>) -> bool {
+pub fn history_up(
+    commands: &[CommandEntry],
+    input: &mut String,
+    index: &mut Option<usize>,
+    draft: &mut Option<String>,
+) -> bool {
     if commands.is_empty() {
         return false;
     }
@@ -27,7 +32,12 @@ pub fn history_up(commands: &[CommandEntry], input: &mut String, index: &mut Opt
     true
 }
 
-pub fn history_down(commands: &[CommandEntry], input: &mut String, index: &mut Option<usize>, draft: &mut Option<String>) -> bool {
+pub fn history_down(
+    commands: &[CommandEntry],
+    input: &mut String,
+    index: &mut Option<usize>,
+    draft: &mut Option<String>,
+) -> bool {
     let Some(current) = *index else {
         return false;
     };
@@ -53,7 +63,11 @@ pub fn input_char_len(input: &str) -> usize {
 }
 
 pub fn cursor_to_byte(input: &str, cursor: usize) -> usize {
-    input.char_indices().nth(cursor).map(|(idx, _)| idx).unwrap_or(input.len())
+    input
+        .char_indices()
+        .nth(cursor)
+        .map(|(idx, _)| idx)
+        .unwrap_or(input.len())
 }
 
 pub fn move_input_cursor_left(cursor: &mut usize) -> bool {
@@ -143,7 +157,13 @@ pub fn token_bounds(input: &str, cursor: usize) -> (usize, usize) {
     (start, end)
 }
 
-pub fn replace_token(input: &mut String, cursor: &mut usize, start: usize, end: usize, replacement: &str) {
+pub fn replace_token(
+    input: &mut String,
+    cursor: &mut usize,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) {
     let start_byte = cursor_to_byte(input, start);
     let end_byte = cursor_to_byte(input, end);
     input.replace_range(start_byte..end_byte, replacement);
@@ -158,7 +178,11 @@ pub fn longest_common_prefix(values: &[String]) -> String {
     let mut prefix: Vec<char> = first.chars().collect();
     for value in &values[1..] {
         let chars: Vec<char> = value.chars().collect();
-        let common = prefix.iter().zip(chars.iter()).take_while(|(a, b)| a == b).count();
+        let common = prefix
+            .iter()
+            .zip(chars.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
         prefix.truncate(common);
         if prefix.is_empty() {
             break;
@@ -178,7 +202,11 @@ fn path_token_parts(token: &str) -> (String, String) {
     }
 }
 
-pub fn collect_path_candidates(current_path: &str, token: &str, dirs_only: bool) -> Vec<(String, bool)> {
+pub fn collect_path_candidates(
+    current_path: &str,
+    token: &str,
+    dirs_only: bool,
+) -> Vec<(String, bool)> {
     let (base_part, leaf) = path_token_parts(token);
     let base_path = if base_part.is_empty() {
         PathBuf::from(current_path)
@@ -205,11 +233,14 @@ pub fn collect_path_candidates(current_path: &str, token: &str, dirs_only: bool)
         }
 
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.to_ascii_lowercase().starts_with(&leaf.to_ascii_lowercase()) {
+        if !name
+            .to_ascii_lowercase()
+            .starts_with(&leaf.to_ascii_lowercase())
+        {
             continue;
         }
 
-        let mut display = format!("{}{}", base_part, name);
+        let mut display = format!("{base_part}{name}");
         if file_type.is_dir() {
             display.push(std::path::MAIN_SEPARATOR);
         }
@@ -255,7 +286,8 @@ pub fn collect_command_candidates(current_path: &str, prefix: &str) -> Vec<Strin
             #[cfg(windows)]
             let candidate = {
                 let path = entry.path();
-                let ext = path.extension()
+                let ext = path
+                    .extension()
                     .map(|ext| format!(".{}", ext.to_string_lossy().to_ascii_lowercase()))
                     .unwrap_or_default();
                 if !pathext.iter().any(|allowed| allowed == &ext) {
@@ -297,15 +329,24 @@ pub fn autocomplete_input(input: &mut String, cursor: &mut usize, current_path: 
     let (start, end) = token_bounds(input, *cursor);
     let chars: Vec<char> = input.chars().collect();
     let token: String = chars[start..end].iter().collect();
-    let first_token_end = chars.iter().position(|c| c.is_whitespace()).unwrap_or(chars.len());
+    let first_token_end = chars
+        .iter()
+        .position(|c| c.is_whitespace())
+        .unwrap_or(chars.len());
     let first_token: String = chars[..first_token_end].iter().collect();
 
     let suggestions: Vec<String> = if start == 0 {
         collect_command_candidates(current_path, &token)
     } else if first_token == "cd" {
-        collect_path_candidates(current_path, &token, true).into_iter().map(|(text, _)| text).collect()
+        collect_path_candidates(current_path, &token, true)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
     } else if token.contains(['\\', '/']) || token.starts_with('.') {
-        collect_path_candidates(current_path, &token, false).into_iter().map(|(text, _)| text).collect()
+        collect_path_candidates(current_path, &token, false)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
     } else {
         Vec::new()
     };
