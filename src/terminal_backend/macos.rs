@@ -7,11 +7,15 @@ use std::thread;
 use super::TerminalUpdate;
 
 // ── PTY / process helpers via libc FFI ────────────────────────────────────────
+//
+// macOS PTY backend. The flow matches the Linux backend with one macOS
+// requirement: after opening the slave, the child must make it the
+// controlling terminal explicitly with TIOCSCTTY (Linux assigns the
+// controlling terminal on first open; BSD-derived kernels, including
+// Darwin, do not).
 
-const O_RDWR: i32 = 0o0002;
-const O_NOCTTY: i32 = 0o0110; // 0o0100 (O_NOCTTY) | 0o0010 (O_CLOEXEC)
-const TIOCGWINSZ: usize = 0x5413;
-const TIOCSWINSZ: usize = 0x5414;
+// TIOCSCTTY on macOS ("acquire controlling tty").
+const TIOCSCTTY: usize = 0x2000_7461;
 
 unsafe extern "C" {
     fn posix_openpt(oflag: i32) -> RawFd;
@@ -27,56 +31,16 @@ unsafe extern "C" {
     fn close(fd: RawFd) -> i32;
 }
 
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn open(path: *const i8, flags: i32) -> RawFd;
-}
-
-#[cfg(not(target_os = "linux"))]
-unsafe fn open(path: *const i8, flags: i32) -> RawFd {
-    // Non-Linux Unixes: declare open(2) where available (macOS has its own
-    // backend in macos.rs); Linux is the primary target.
-    #[cfg(any(
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly"
-    ))]
-    {
-        extern "C" {
-            fn open(path: *const libc::c_char, flags: libc::c_int, ...) -> libc::c_int;
-        }
-        open(path, flags)
-    }
-    #[cfg(not(any(
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly"
-    )))]
-    {
-        let _ = (path, flags);
-        -1 as RawFd
-    }
-}
-
 /// Set the PTY window size via TIOCSWINSZ.
 fn pty_set_size(master_fd: RawFd, rows: u16, cols: u16) {
-    #[repr(C)]
-    struct Winsize {
-        ws_row: u16,
-        ws_col: u16,
-        ws_xpixel: u16,
-        ws_ypixel: u16,
-    }
-    let ws = Winsize {
+    let ws = libc::winsize {
         ws_row: rows,
         ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
     unsafe {
-        libc::ioctl(master_fd, TIOCSWINSZ as _, &ws);
+        libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
     }
 }
 
@@ -209,11 +173,12 @@ fn spawn_pty(
     cwd: &str,
     tx: Sender<TerminalUpdate>,
 ) -> Result<PlatformCommand, String> {
-    let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
+    let master_fd = unsafe { posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
     if master_fd < 0 {
         return Err("posix_openpt failed".to_string());
     }
 
+    // grantpt/unlockpt are no-ops on macOS but are kept for interface parity.
     if unsafe { grantpt(master_fd) } != 0 {
         unsafe { close(master_fd) };
         return Err("grantpt failed".to_string());
@@ -235,7 +200,7 @@ fn spawn_pty(
     // Initial size from the host terminal.
     let (rows, cols) = unsafe {
         let mut ws = std::mem::zeroed::<libc::winsize>();
-        libc::ioctl(libc::STDOUT_FILENO, TIOCGWINSZ as _, &mut ws);
+        libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws);
         (ws.ws_row, ws.ws_col)
     };
     pty_set_size(master_fd, rows.max(2), cols.max(2));
@@ -258,10 +223,14 @@ fn spawn_pty(
             0 => {
                 // ── Child ──
                 let _ = setsid();
-                let slave_fd = open(slave_c.as_ptr(), O_RDWR | O_NOCTTY);
+                let slave_fd = libc::open(slave_c.as_ptr(), libc::O_RDWR);
                 if slave_fd < 0 {
                     libc::_exit(127);
                 }
+                // macOS: the session has no controlling terminal until one is
+                // claimed explicitly. Ignore the result — the tty still works
+                // without a controlling terminal for our purposes.
+                let _ = libc::ioctl(slave_fd, TIOCSCTTY as _, 0);
                 let _ = dup2(slave_fd, libc::STDIN_FILENO);
                 let _ = dup2(slave_fd, libc::STDOUT_FILENO);
                 let _ = dup2(slave_fd, libc::STDERR_FILENO);

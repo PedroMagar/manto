@@ -39,8 +39,9 @@ src/
     history.rs
   terminal_backend/    persistent shell sessions (PTY/ConPTY FFI)
     mod.rs             CommandSession + platform selection
-    unix.rs
-    windows.rs
+    unix.rs            Linux/BSD PTY backend
+    macos.rs           macOS PTY backend (TIOCSCTTY controlling terminal)
+    windows.rs         Windows ConPTY/piped backend
   config.rs            user config (~/.manto/config.json): theme + remappable shortcuts
   json.rs              minimal zero-dependency JSON parser (shared)
   session.rs           session persistence (~/.manto/session.json)
@@ -131,8 +132,9 @@ This means features such as shell history and completion should ideally come fro
 
 Adopted constraints for this direction:
 
-- PTY (Unix) and ConPTY (Windows) are implemented through hand-written FFI, with no external crates. This matches the portability policy above.
-- Unix and Windows backends evolve in parallel behind a single `TerminalBackend` interface.
+- PTY (Linux/BSD/macOS) and ConPTY (Windows) are implemented through hand-written FFI, with no external crates. This matches the portability policy above.
+- Each OS backend evolves in parallel behind a single `TerminalBackend` interface: `unix.rs` (Linux/BSD), `macos.rs` (Darwin, whose PTY needs an explicit `TIOCSCTTY` to claim the controlling terminal), `windows.rs` (ConPTY + piped fallback).
+- The `os/` layer (raw mode, key/mouse decoding, clipboard) is shared between Linux and macOS; only the clipboard tools differ (`pbcopy`/`pbpaste` vs `xclip`/`xsel`/`wl-copy`).
 
 ## Why A Backend Alone Is Not Enough
 

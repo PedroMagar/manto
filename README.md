@@ -13,7 +13,7 @@ MIT — see [LICENSE](LICENSE).
 ## Requirements
 
 - Rust 1.88+ (the project uses the 2024 edition and let-chains)
-- Windows or Linux (a Unix-like OS); macOS is untested
+- Windows, Linux or macOS
 
 ## How To Run
 

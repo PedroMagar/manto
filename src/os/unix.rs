@@ -5,22 +5,12 @@ use std::time::{Duration, Instant};
 
 static mut ORIG_TERMIOS: Option<libc::termios> = None;
 
+#[derive(Default)]
 struct HeldState {
     up: bool,
     down: bool,
     left: bool,
     right: bool,
-}
-
-impl Default for HeldState {
-    fn default() -> Self {
-        Self {
-            up: false,
-            down: false,
-            left: false,
-            right: false,
-        }
-    }
 }
 
 const HELD_ARROWS_NONE: HeldState = HeldState {
@@ -44,8 +34,8 @@ pub fn enable_raw_mode() {
         raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG | libc::IEXTEN);
         raw.c_iflag &= !(libc::IXON);
         raw.c_oflag &= !(libc::OPOST);
-        raw.c_cc[libc::VMIN as usize] = 1;
-        raw.c_cc[libc::VTIME as usize] = 0;
+        raw.c_cc[libc::VMIN] = 1;
+        raw.c_cc[libc::VTIME] = 0;
         libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
     }
 
@@ -240,10 +230,10 @@ pub fn read_key() -> Key {
             }
             b if b.is_ascii_graphic() || b == b' ' => return Key::Char(b as char),
             b if b >= 0x80 => {
-                if let Some(c) = read_utf8_char(b) {
-                    if !c.is_control() {
-                        return Key::Char(c);
-                    }
+                if let Some(c) = read_utf8_char(b)
+                    && !c.is_control()
+                {
+                    return Key::Char(c);
                 }
                 continue;
             }
@@ -275,11 +265,11 @@ fn read_utf8_char(first: u8) -> Option<char> {
 pub fn held_arrow_keys() -> super::HeldArrowKeys {
     unsafe {
         let now = Instant::now();
-        if let Some(last) = LAST_ARROW_TIME {
-            if now.duration_since(last) > Duration::from_millis(500) {
-                HELD_ARROWS = HeldState::default();
-                LAST_ARROW_TIME = None;
-            }
+        if let Some(last) = LAST_ARROW_TIME
+            && now.duration_since(last) > Duration::from_millis(500)
+        {
+            HELD_ARROWS = HeldState::default();
+            LAST_ARROW_TIME = None;
         }
         super::HeldArrowKeys {
             up: HELD_ARROWS.up,
@@ -479,8 +469,8 @@ mod mouse_tests {
 }
 
 // ── Clipboard (external tools, best-effort) ──────────────────────────────────
-// Uses xclip/xsel (X11) or wl-copy/wl-paste (Wayland) when present; Manto keeps
-// an in-memory fallback if none is available.
+// Uses pbcopy/pbpaste (macOS), xclip/xsel (X11) or wl-copy/wl-paste (Wayland)
+// when present; Manto keeps an in-memory fallback if none is available.
 
 fn tool_ok(tool: &str) -> bool {
     std::process::Command::new(tool)
@@ -494,13 +484,17 @@ fn tool_ok(tool: &str) -> bool {
 }
 
 pub fn clipboard_set(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    const SETTERS: [(&str, &[&str]); 1] = [("pbcopy", &[])];
+    #[cfg(not(target_os = "macos"))]
     const SETTERS: [(&str, &[&str]); 3] = [
         ("xclip", &["-selection", "clipboard"]),
         ("xsel", &["--clipboard", "--input"]),
         ("wl-copy", &[]),
     ];
     for (tool, args) in SETTERS {
-        if !tool_ok(tool) {
+        // pbcopy/pbpaste ship with macOS and take no --version flag.
+        if !cfg!(target_os = "macos") && !tool_ok(tool) {
             continue;
         }
         let mut cmd = std::process::Command::new(tool);
@@ -529,13 +523,17 @@ pub fn clipboard_set(text: &str) -> bool {
 }
 
 pub fn clipboard_get() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    const GETTERS: [(&str, &[&str]); 1] = [("pbpaste", &[])];
+    #[cfg(not(target_os = "macos"))]
     const GETTERS: [(&str, &[&str]); 3] = [
         ("xclip", &["-selection", "clipboard", "-o"]),
         ("xsel", &["--clipboard", "--output"]),
         ("wl-paste", &[]),
     ];
     for (tool, args) in GETTERS {
-        if !tool_ok(tool) {
+        // pbcopy/pbpaste ship with macOS and take no --version flag.
+        if !cfg!(target_os = "macos") && !tool_ok(tool) {
             continue;
         }
         let out = std::process::Command::new(tool)
@@ -544,14 +542,15 @@ pub fn clipboard_get() -> Option<String> {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output();
-        if let Ok(o) = out {
-            if o.status.success() && !o.stdout.is_empty() {
-                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                while s.ends_with('\n') || s.ends_with('\r') {
-                    s.pop();
-                }
-                return Some(s);
+        if let Ok(o) = out
+            && o.status.success()
+            && !o.stdout.is_empty()
+        {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            while s.ends_with('\n') || s.ends_with('\r') {
+                s.pop();
             }
+            return Some(s);
         }
     }
     None

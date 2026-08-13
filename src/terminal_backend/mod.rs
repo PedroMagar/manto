@@ -220,7 +220,11 @@ impl TerminalBackend for CommandSession {
 #[path = "windows.rs"]
 mod platform;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+
+#[cfg(all(unix, not(target_os = "macos")))]
 #[path = "unix.rs"]
 mod platform;
 
